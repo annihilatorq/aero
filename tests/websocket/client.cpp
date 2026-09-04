@@ -49,6 +49,8 @@ namespace websocket = aero::websocket;
 using aero::tests::websocket::serialize_unmasked_frame;
 using aero::tests::websocket::to_bytes;
 using aero::tests::websocket::to_string;
+using aero::tests::websocket::unmask_payload;
+using aero::websocket::detail::masking_key;
 using aero::websocket::detail::opcode;
 using namespace std::chrono_literals;
 
@@ -87,27 +89,33 @@ namespace {
     return response;
   }
 
-  std::uint16_t read_masked_close_code(connection& conn) {
-    auto header = conn.read_bytes(2);
-    auto first_byte = static_cast<std::uint8_t>(header[0]);
-    auto second_byte = static_cast<std::uint8_t>(header[1]);
+  std::vector<std::byte> read_masked_frame_payload(connection& conn, opcode expected_opcode) {
+    auto header = to_bytes(conn.read_bytes(2));
+    auto first_byte = std::to_integer<std::uint8_t>(header[0]);
+    auto second_byte = std::to_integer<std::uint8_t>(header[1]);
 
-    if ((first_byte & 0x0FU) != 0x08U) {
-      throw std::runtime_error{"expected a close frame"};
+    if ((first_byte & 0x0FU) != static_cast<std::uint8_t>(expected_opcode)) {
+      throw std::runtime_error{"unexpected frame opcode"};
+    }
+    if ((second_byte & 0x80U) == 0U) {
+      throw std::runtime_error{"expected a masked frame"};
     }
 
     auto payload_length = static_cast<std::size_t>(second_byte & 0x7FU);
-    if ((second_byte & 0x80U) == 0U || payload_length < 2U) {
-      throw std::runtime_error{"expected a masked close frame carrying a close code"};
+    auto key_bytes = to_bytes(conn.read_bytes(4));
+    masking_key key{key_bytes[0], key_bytes[1], key_bytes[2], key_bytes[3]};
+
+    return unmask_payload(to_bytes(conn.read_bytes(payload_length)), key);
+  }
+
+  std::uint16_t read_masked_close_code(connection& conn) {
+    auto payload = read_masked_frame_payload(conn, opcode::close);
+    if (payload.size() < 2U) {
+      throw std::runtime_error{"expected a close frame carrying a close code"};
     }
 
-    auto mask = conn.read_bytes(4);
-    auto payload = conn.read_bytes(payload_length);
-    auto unmasked = [&](std::size_t index) {
-      return static_cast<std::uint8_t>(static_cast<std::uint8_t>(payload[index]) ^ static_cast<std::uint8_t>(mask[index % 4U]));
-    };
-
-    return static_cast<std::uint16_t>((unmasked(0) << 8U) | unmasked(1));
+    return static_cast<std::uint16_t>(
+      (std::to_integer<std::uint8_t>(payload[0]) << 8U) | std::to_integer<std::uint8_t>(payload[1]));
   }
 
 } // namespace

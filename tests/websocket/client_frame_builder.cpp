@@ -30,6 +30,7 @@ using aero::tests::websocket::make_payload_bytes;
 using aero::tests::websocket::starts_with;
 using aero::tests::websocket::to_bytes;
 using aero::tests::websocket::to_string;
+using aero::tests::websocket::unmask_payload;
 
 using protocol_error = aero::websocket::protocol_error;
 
@@ -78,17 +79,6 @@ std::span<const std::byte> payload_bytes(std::span<const std::byte> frame_bytes)
 
   const std::size_t payload_offset = 2U + extended_length_size + 4U;
   return frame_bytes.subspan(payload_offset, payload_length);
-}
-
-std::vector<std::byte> unmask_payload(std::span<const std::byte> masked_payload, masking_key key) {
-  std::vector<std::byte> unmasked;
-  unmasked.resize(masked_payload.size());
-  for (std::size_t i{}; i < masked_payload.size(); ++i) {
-    const auto masked_value = std::to_integer<std::uint8_t>(masked_payload[i]);
-    const auto key_value = std::to_integer<std::uint8_t>(key[i % 4U]);
-    unmasked[i] = std::byte{static_cast<std::uint8_t>(masked_value ^ key_value)};
-  }
-  return unmasked;
 }
 
 std::vector<std::byte> mask_payload(std::span<const std::byte> unmasked_payload, masking_key key) {
