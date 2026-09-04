@@ -657,32 +657,46 @@ namespace aero::websocket {
       return synchronize_awaitable<std::error_code>(async_send_binary(data, return_as_awaitable_tuple()));
     }
 
-    std::error_code ping() {
-      return synchronize_awaitable<std::error_code>(async_ping(return_as_awaitable_tuple()));
-    }
-
-    // Caller must ensure that given buffer remains valid until the operation is completed
-    std::error_code ping(std::string_view text) {
-      return synchronize_awaitable<std::error_code>(async_ping(text, return_as_awaitable_tuple()));
-    }
-
-    // Caller must ensure that given buffer remains valid until the operation is completed
     std::error_code ping(std::span<const std::byte> data) {
-      return synchronize_awaitable<std::error_code>(async_ping(data, return_as_awaitable_tuple()));
+      if (!is_current_state(state::open) || is_close_received()) {
+        return protocol_error::connection_closed;
+      }
+
+      auto frame = client_frame_builder_.build_ping_frame(data);
+      if (!frame) {
+        return frame.error();
+      }
+
+      return write_bytes(*frame);
+    }
+
+    std::error_code ping(std::string_view text) {
+      return ping(std::as_bytes(std::span{text}));
+    }
+
+    std::error_code ping() {
+      return ping(null_bytes);
+    }
+
+    std::error_code pong(std::span<const std::byte> data) {
+      if (!is_current_state(state::open, state::closing) || is_close_received()) {
+        return protocol_error::connection_closed;
+      }
+
+      auto frame = client_frame_builder_.build_pong_frame(data);
+      if (!frame) {
+        return frame.error();
+      }
+
+      return write_bytes(*frame);
+    }
+
+    std::error_code pong(std::string_view text) {
+      return pong(std::as_bytes(std::span{text}));
     }
 
     std::error_code pong() {
-      return synchronize_awaitable<std::error_code>(async_pong(return_as_awaitable_tuple()));
-    }
-
-    // Caller must ensure that given buffer remains valid until the operation is completed
-    std::error_code pong(std::string_view text) {
-      return synchronize_awaitable<std::error_code>(async_pong(text, return_as_awaitable_tuple()));
-    }
-
-    // Caller must ensure that given buffer remains valid until the operation is completed
-    std::error_code pong(std::span<const std::byte> data) {
-      return synchronize_awaitable<std::error_code>(async_pong(data, return_as_awaitable_tuple()));
+      return pong(null_bytes);
     }
 
     std::error_code close(websocket::close_code code) {
@@ -850,6 +864,19 @@ namespace aero::websocket {
         bound_token,
         this,
         frame);
+    }
+
+    std::error_code write_bytes(std::span<const std::byte> frame) {
+      std::error_code write_ec;
+      std::size_t bytes_written = asio::write(*transport_, asio::buffer(frame), write_ec);
+      if (!write_ec) {
+        return std::error_code{};
+      }
+
+      // RFC6455 - 7.2.1. Client-Initiated Closure:
+      // If at any point the underlying transport layer connection is
+      // unexpectedly lost, the client MUST _Fail the WebSocket Connection_.
+      return finalize_session(write_ec);
     }
 
     template <typename CompletionToken>
