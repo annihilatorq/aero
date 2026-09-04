@@ -28,6 +28,7 @@
 #include "aero/http/headers.hpp"
 #include "aero/http/status.hpp"
 #include "aero/http/status_line.hpp"
+#include "aero/urls/url.hpp"
 #include "aero/util/deadline.hpp"
 #include "aero/util/final_action.hpp"
 #include "aero/websocket/client.hpp"
@@ -46,6 +47,7 @@ namespace http = aero::http;
 namespace websocket = aero::websocket;
 
 using aero::tests::websocket::serialize_unmasked_frame;
+using aero::tests::websocket::to_bytes;
 using aero::tests::websocket::to_string;
 using aero::websocket::detail::opcode;
 using namespace std::chrono_literals;
@@ -288,6 +290,90 @@ int main() {
       auto [connect_ec, response] = client.connect("ws:///socket");
 
       expect(connect_ec == aero::urls::url_error::authority_invalid);
+    };
+
+    "connect accepts a urls::url value"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+      });
+
+      auto parsed_url = aero::urls::url::parse(url_str);
+      require(parsed_url.has_value());
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(std::move(*parsed_url));
+
+      expect(not static_cast<bool>(connect_ec)) << "connect with a urls::url failed: " << connect_ec.message();
+      expect(response.status_code() == http::status::switching_protocols);
+    };
+
+    "connect accepts the std::expected result of urls::url::parse"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(aero::urls::url::parse(url_str));
+
+      expect(not static_cast<bool>(connect_ec)) << "connect with a parse result failed: " << connect_ec.message();
+      expect(response.status_code() == http::status::switching_protocols);
+    };
+
+    "connect reports connection_refused when nothing is listening and a retry succeeds"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      std::uint16_t unused_port = 0;
+      {
+        asio::io_context probe_context;
+        tcp::acceptor probe{probe_context, tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0)};
+        unused_port = probe.local_endpoint().port();
+      }
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+      });
+
+      websocket::client client;
+      auto [refused_ec, refused_response] = client.connect("ws://127.0.0.1:" + std::to_string(unused_port) + "/socket");
+
+      expect(refused_ec == asio::error::connection_refused)
+        << "connect to a port with no listener should be refused, got: " << refused_ec.message();
+      expect(client.is_closed()) << "failed connect must return the connection to the closed state";
+
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec)) << "connect after a refused attempt failed: " << connect_ec.message();
+      expect(response.status_code() == http::status::switching_protocols);
+    };
+
+    "read returns the message the server sent in the same packet as the handshake response"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        auto response = make_websocket_switching_response(raw_request);
+        response += to_string(serialize_unmasked_frame(opcode::text, true, to_bytes("hello")));
+        conn->write_response(response);
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      auto message = client.read();
+      expect(message.has_value()) << "frame bytes received together with the handshake must reach the reader";
+      if (not message.has_value()) {
+        return;
+      }
+
+      expect(message->is_text());
+      expect(to_string(message->payload) == "hello");
     };
 
     "read returns message_too_big and fails the connection with close code 1009 when a message exceeds max_message_size"_test =
