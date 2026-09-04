@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <expected>
 #include <vector>
 
 #include "aero/http/headers.hpp"
@@ -56,5 +57,35 @@ namespace aero::http {
       return not empty();
     }
   };
+
+  namespace detail {
+
+    [[nodiscard]] inline std::pair<std::error_code, http::response> parse_response_partial(std::string_view str) {
+      http::response response;
+
+      auto status_line_end = str.find(http::detail::crlf);
+      if (status_line_end == std::string_view::npos) {
+        return {http::protocol_error::status_line_invalid, {}};
+      }
+
+      auto status_line = http::status_line::parse(str.substr(0, status_line_end));
+      if (!status_line) {
+        return {status_line.error(), {}};
+      }
+
+      response.status_line = *status_line;
+
+      auto headers_section_start = status_line_end + http::detail::crlf.size();
+      auto response_headers = http::headers::parse(str.substr(headers_section_start));
+      if (!response_headers) {
+        return {response_headers.error(), std::move(response)};
+      }
+
+      response.headers = *response_headers;
+
+      return {{}, std::move(response)};
+    }
+
+  } // namespace detail
 
 } // namespace aero::http

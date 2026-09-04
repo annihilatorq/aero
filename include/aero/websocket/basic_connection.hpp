@@ -1,5 +1,6 @@
 #pragma once
 
+#include <asio/buffer.hpp>
 #include <atomic>
 #include <chrono>
 #include <expected>
@@ -117,21 +118,16 @@ namespace aero::websocket {
 
             const urls::url& url = *parsed_url;
 
-            if (!url.has_authority() || url.host().empty()) {
-              co_return {urls::url_error::authority_invalid, http::response{}};
+            if (auto ec = validate_websocket_url(url); ec) {
+              co_return {ec, http::response{}};
             }
 
-            bool is_using_secure_transport = aero::striequal(url.scheme(), "wss");
-            if (!aero::striequal(url.scheme(), "ws") && !is_using_secure_transport) {
-              co_return {urls::url_error::scheme_invalid, http::response{}};
-            }
-
-            auto port = websocket::get_port_for_scheme(*parsed_url);
+            auto port = websocket::get_port_for_scheme(url);
             if (!port) {
               co_return {port.error(), http::response{}};
             }
 
-            if (auto ec = self->construct_transport(is_using_secure_transport); ec) {
+            if (auto ec = self->construct_transport(aero::striequal(url.scheme(), "wss")); ec) {
               co_return {ec, http::response{}};
             }
 
@@ -179,42 +175,23 @@ namespace aero::websocket {
               self->data_received_in_handshake_ = std::vector{std::from_range, data_after_handshake};
             }
 
-            http::response server_response;
-            std::string_view handshake_response{reinterpret_cast<const char*>(response_buffer.data()), bytes_read};
+            std::string_view response_str{reinterpret_cast<const char*>(response_buffer.data()), bytes_read};
 
-            auto status_line_end = handshake_response.find(http::detail::crlf);
-            if (status_line_end == std::string_view::npos) {
+            auto [parse_ec, response] = http::detail::parse_response_partial(response_str);
+            if (parse_ec) {
               co_await self->async_finalize_session({}, return_as_deferred_tuple());
-              co_return {http::protocol_error::status_line_invalid, http::response{}};
+              co_return {parse_ec, std::move(response)};
             }
-
-            auto status_line = http::status_line::parse(handshake_response.substr(0, status_line_end));
-            if (!status_line) {
-              co_await self->async_finalize_session({}, return_as_deferred_tuple());
-              co_return {status_line.error(), http::response{}};
-            }
-
-            server_response.status_line = *status_line;
-
-            auto headers_section_start = status_line_end + http::detail::crlf.size();
-            auto response_headers = http::headers::parse(handshake_response.substr(headers_section_start));
-            if (!response_headers) {
-              co_await self->async_finalize_session({}, return_as_deferred_tuple());
-              co_return {response_headers.error(), std::move(server_response)};
-            }
-
-            server_response.headers = *response_headers;
 
             // Perform upgrade challenge with server handshake response
-            auto challenge_ec =
-              self->client_handshaker_.validate_server_handshake(server_response, handshake->sec_websocket_key);
+            auto challenge_ec = self->client_handshaker_.validate_server_handshake(response, handshake->sec_websocket_key);
             if (challenge_ec) {
               co_await self->async_finalize_session({}, return_as_deferred_tuple());
-              co_return {challenge_ec, std::move(server_response)};
+              co_return {challenge_ec, std::move(response)};
             }
 
             self->set_connection_state(state::open);
-            co_return {std::error_code{}, std::move(server_response)};
+            co_return {std::error_code{}, std::move(response)};
           },
           strand_),
         bound_token,
@@ -577,63 +554,97 @@ namespace aero::websocket {
         this);
     }
 
-    std::tuple<std::error_code, http::response> connect(urls::url url, http::headers headers) {
-      return synchronize_awaitable<http::response>(
-        async_connect(std::move(url), std::move(headers), return_as_awaitable_tuple()));
-    }
-
-    std::tuple<std::error_code, http::response> connect(urls::url url, http::headers headers, duration timeout) {
-      return synchronize_awaitable<http::response>(
-        async_connect(std::move(url), std::move(headers), asio::cancel_after(timeout, return_as_awaitable_tuple())));
-    }
-
     std::tuple<std::error_code, http::response> connect(std::expected<urls::url, std::error_code> parsed_url,
-      http::headers headers) {
+      http::headers headers = {}) {
+      if (!is_current_state(state::closed)) {
+        return {protocol_error::connection_not_closed, {}};
+      }
+
       if (!parsed_url) {
         return {parsed_url.error(), {}};
       }
-      return connect(std::move(parsed_url.value()), std::move(headers));
-    }
 
-    std::tuple<std::error_code, http::response> connect(std::expected<urls::url, std::error_code> parsed_url,
-      http::headers headers, duration timeout) {
-      if (!parsed_url) {
-        return {parsed_url.error(), {}};
+      const urls::url& url = *parsed_url;
+      if (auto ec = validate_websocket_url(url); ec) {
+        return {ec, http::response{}};
       }
-      return connect(std::move(parsed_url.value()), std::move(headers), timeout);
+
+      auto port = websocket::get_port_for_scheme(url);
+      if (!port) {
+        return {port.error(), http::response{}};
+      }
+
+      if (auto ec = construct_transport(aero::striequal(url.scheme(), "wss")); ec) {
+        return {ec, {}};
+      }
+
+      reset_connection_state(state::connecting);
+
+      auto connect_ec = transport_->connect(std::string{url.host()}, *port);
+      if (connect_ec) {
+        std::ignore = finalize_session();
+        return {connect_ec, {}};
+      }
+
+      // Build bodyless HTTP websocket upgrade request
+      auto handshake = client_handshaker_.build_request(url, std::move(headers));
+      if (!handshake) {
+        std::ignore = finalize_session();
+        return {handshake.error(), {}};
+      }
+
+      std::error_code write_ec;
+      asio::write(*transport_, asio::buffer(handshake->bytes()), write_ec);
+      if (write_ec) {
+        std::ignore = finalize_session();
+        return {write_ec, {}};
+      }
+
+      std::error_code read_ec;
+      std::vector<std::byte> response_buffer;
+
+      // Read server response until "\r\n\r\n"
+      std::size_t bytes_read =
+        asio::read_until(*transport_, asio::dynamic_buffer(response_buffer), http::detail::double_crlf, read_ec);
+      if (read_ec) {
+        std::ignore = finalize_session();
+        return {read_ec, {}};
+      }
+
+      // https://www.boost.org/doc/libs/1_43_0/doc/html/boost_asio/reference/read_until.html
+      // "After a successful async_read_until operation, the streambuf
+      // may contain additional data beyond the delimiter"
+      const bool buffer_has_data_after_delimiter = response_buffer.size() > bytes_read;
+      if (buffer_has_data_after_delimiter) {
+        auto data_after_handshake = std::span{response_buffer}.subspan(bytes_read);
+        data_received_in_handshake_ = std::vector{std::from_range, data_after_handshake};
+      }
+
+      std::string_view response_str{reinterpret_cast<const char*>(response_buffer.data()), bytes_read};
+
+      auto [parse_ec, response] = http::detail::parse_response_partial(response_str);
+      if (parse_ec) {
+        std::ignore = finalize_session();
+        return {parse_ec, std::move(response)};
+      }
+
+      // Perform upgrade challenge with server handshake response
+      auto challenge_ec = client_handshaker_.validate_server_handshake(response, handshake->sec_websocket_key);
+      if (challenge_ec) {
+        std::ignore = finalize_session();
+        return {challenge_ec, std::move(response)};
+      }
+
+      set_connection_state(state::open);
+      return {std::error_code{}, std::move(response)};
     }
 
-    std::tuple<std::error_code, http::response> connect(std::string_view url_string, http::headers headers) {
+    std::tuple<std::error_code, http::response> connect(urls::url url, http::headers headers = {}) {
+      return connect(std::expected<urls::url, std::error_code>{std::move(url)}, std::move(headers));
+    }
+
+    std::tuple<std::error_code, http::response> connect(std::string_view url_string, http::headers headers = {}) {
       return connect(urls::url::parse(url_string), std::move(headers));
-    }
-
-    std::tuple<std::error_code, http::response> connect(std::string_view url_string, http::headers headers, duration timeout) {
-      return connect(urls::url::parse(url_string), std::move(headers), timeout);
-    }
-
-    std::tuple<std::error_code, http::response> connect(urls::url url) {
-      return connect(std::move(url), http::headers{});
-    }
-
-    std::tuple<std::error_code, http::response> connect(urls::url url, duration timeout) {
-      return connect(std::move(url), http::headers{}, timeout);
-    }
-
-    std::tuple<std::error_code, http::response> connect(std::expected<urls::url, std::error_code> parsed_url) {
-      return connect(std::move(parsed_url), http::headers{});
-    }
-
-    std::tuple<std::error_code, http::response> connect(std::expected<urls::url, std::error_code> parsed_url,
-      duration timeout) {
-      return connect(std::move(parsed_url), http::headers{}, timeout);
-    }
-
-    std::tuple<std::error_code, http::response> connect(std::string_view url_string) {
-      return connect(url_string, http::headers{});
-    }
-
-    std::tuple<std::error_code, http::response> connect(std::string_view url_string, duration timeout) {
-      return connect(url_string, http::headers{}, timeout);
     }
 
     // Caller must ensure that given buffer remains valid until the operation is completed
@@ -759,6 +770,19 @@ namespace aero::websocket {
       }
       if (websocket::is_protocol_violation(ec)) {
         return close_code::protocol_error;
+      }
+
+      return {};
+    }
+
+    static std::error_code validate_websocket_url(const urls::url& url) {
+      if (!url.has_authority() || url.host().empty()) {
+        return urls::url_error::authority_invalid;
+      }
+
+      bool is_using_secure_transport = aero::striequal(url.scheme(), "wss");
+      if (!aero::striequal(url.scheme(), "ws") && !is_using_secure_transport) {
+        return urls::url_error::scheme_invalid;
       }
 
       return {};
@@ -950,6 +974,17 @@ namespace aero::websocket {
         bound_token,
         this,
         final_ec);
+    }
+
+    std::error_code finalize_session(std::error_code final_ec = {}) {
+      if (is_current_state(state::closed)) {
+        return final_ec;
+      }
+
+      reset_connection_state(state::closed);
+
+      auto shutdown_ec = transport_->shutdown();
+      return final_ec ? final_ec : shutdown_ec;
     }
 
     template <typename CompletionToken>
