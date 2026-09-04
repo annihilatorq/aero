@@ -384,6 +384,37 @@ int main() {
       expect(to_string(message->payload) == "hello");
     };
 
+    "ping sends a masked ping frame carrying the given bytes"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      std::vector<std::byte> received_payload;
+      std::latch ping_received{1};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+        received_payload = read_masked_frame_payload(*conn, opcode::ping);
+        ping_received.count_down();
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      auto ping_ec = client.ping(to_bytes("keepalive"));
+      expect(not static_cast<bool>(ping_ec)) << "ping failed: " << ping_ec.message();
+
+      ping_received.wait();
+      expect(to_string(received_payload) == "keepalive") << "ping payload must reach the peer unchanged";
+    };
+
+    "ping with bytes returns connection_closed before connect"_test = [&] {
+      websocket::client client;
+      auto ping_ec = client.ping(to_bytes("keepalive"));
+
+      expect(ping_ec == websocket::protocol_error::connection_closed);
+    };
+
     "read returns message_too_big and fails the connection with close code 1009 when a message exceeds max_message_size"_test =
       [&] {
         aero::final_action cleanup{[&] { server.close_last_conn(); }};
