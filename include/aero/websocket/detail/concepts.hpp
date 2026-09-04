@@ -114,16 +114,15 @@ namespace aero::websocket::concepts {
       { client.ping(text) } -> std::same_as<std::error_code>;
       { client.ping(bytes) } -> std::same_as<std::error_code>;
 
-      { client.pong() } -> std::same_as<std::error_code>;
-      { client.pong(text) } -> std::same_as<std::error_code>;
       { client.pong(bytes) } -> std::same_as<std::error_code>;
+      { client.pong(text) } -> std::same_as<std::error_code>;
+      { client.pong() } -> std::same_as<std::error_code>;
 
       { client.close(close_code) } -> std::same_as<std::error_code>;
       { client.close(close_code, close_reason) } -> std::same_as<std::error_code>;
       { client.force_close() } -> std::same_as<std::error_code>;
 
       { client.read() } -> std::same_as<std::expected<websocket::message, std::error_code>>;
-      { client.read(timeout) } -> std::same_as<std::expected<websocket::message, std::error_code>>;
 
       { client.is_open_for_writing() } -> std::same_as<bool>;
       { client.is_connecting() } -> std::same_as<bool>;
