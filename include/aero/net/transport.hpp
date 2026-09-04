@@ -16,6 +16,8 @@
 #include <asio/connect.hpp>
 #include <asio/deferred.hpp>
 #include <asio/error.hpp>
+#include <asio/ip/address.hpp>
+#include <asio/ip/basic_endpoint.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/redirect_error.hpp>
 #include <asio/strand.hpp>
@@ -34,6 +36,7 @@
 #include <asio/ssl.hpp>
 #include <asio/ssl/error.hpp>
 #include <asio/ssl/stream.hpp>
+#include <asio/ssl/stream_base.hpp>
 #endif
 
 #include "aero/detail/aligned_allocator.hpp"
@@ -42,9 +45,10 @@
 namespace aero::net {
 
   class transport {
-    using tcp_socket = asio::ip::tcp::socket;
+    using tcp = asio::ip::tcp;
+    using tcp_socket = tcp::socket;
     using deferred_tcp_socket = asio::as_tuple_t<asio::deferred_t>::as_default_on_t<tcp_socket>;
-    using deferred_tcp_resolver = asio::as_tuple_t<asio::deferred_t>::as_default_on_t<asio::ip::tcp::resolver>;
+    using deferred_tcp_resolver = asio::as_tuple_t<asio::deferred_t>::as_default_on_t<tcp::resolver>;
     using write_completion_handler = asio::any_completion_handler<void(std::error_code, std::size_t)>;
 
 #if AERO_USE_TLS
@@ -61,36 +65,22 @@ namespace aero::net {
 
             auto [handshake_ec] = co_await self->tls_stream_->async_handshake(asio::ssl::stream_base::client);
 
-#ifdef AERO_USE_WOLFSSL
-            if (handshake_ec) {
-              auto wolfssl_error = ::SSL_get_error(self->tls_stream_->native_handle(), 0);
-              if (auto cert_error = tls::detail::wolfssl_error_to_cert_error(wolfssl_error)) {
-                co_return cert_error.value();
-              }
-            }
-#endif
-
-            auto verify_result = static_cast<x509_verify_error>(::SSL_get_verify_result(self->tls_stream_->native_handle()));
-            if (verify_result != x509_verify_error::ok) {
-              auto cert_error = tls::detail::verify_error_to_cert_error(verify_result);
-              if (cert_error) {
-                co_return cert_error.value();
-              }
-            }
-
-            auto alert = tls_alerts.get_last_tls_alert();
-            if (alert) {
-              auto alert_ec = tls::detail::tls_alert_to_error_code(*alert);
-              if (alert_ec) {
-                co_return alert_ec.value();
-              }
-            }
-
-            co_return handshake_ec;
+            co_return self->transform_handshake_error(handshake_ec, tls_alerts);
           },
           strand_),
         bound_token,
         this);
+    }
+
+    std::error_code handshake() {
+      using tls::detail::x509_verify_error;
+      tls::detail::alert_capture tls_alerts;
+      tls_alerts.install(tls_stream_->native_handle());
+
+      std::error_code handshake_ec;
+      static_cast<void>(tls_stream_->handshake(asio::ssl::stream_base::client, handshake_ec));
+
+      return transform_handshake_error(handshake_ec, tls_alerts);
     }
 #endif
 
@@ -171,6 +161,49 @@ namespace aero::net {
         port);
     }
 
+    std::error_code connect(std::string host, asio::ip::port_type port) {
+      std::error_code connect_ec;
+      std::error_code address_ec;
+      auto address = asio::ip::make_address(host, address_ec);
+      bool is_using_address = !static_cast<bool>(address_ec);
+
+      if (is_using_address) {
+        tcp::endpoint endpoint{address, port};
+        static_cast<void>(socket_.connect(endpoint, connect_ec));
+      } else {
+        tcp::resolver resolver{strand_};
+        std::error_code resolve_ec;
+        auto resolved_endpoints = resolver.resolve(host, std::to_string(port), resolve_ec);
+        if (resolve_ec) {
+          return resolve_ec;
+        }
+
+        asio::connect(socket_, resolved_endpoints, connect_ec);
+      }
+
+      if (connect_ec) {
+        return connect_ec;
+      }
+
+#if AERO_USE_TLS
+      if (is_using_tls_stream()) {
+        if (!is_using_address) {
+          if (auto ec = tls::set_sni(tls_stream_->native_handle(), host); ec) {
+            return ec;
+          }
+
+          if (auto ec = tls::set_expected_peer_host(tls_stream_->native_handle(), host); ec) {
+            return ec;
+          }
+        }
+
+        return handshake();
+      }
+#endif
+
+      return {};
+    }
+
     template <typename CompletionToken>
     auto async_shutdown(CompletionToken&& token) {
       auto bound_token = asio::bind_allocator(aero::detail::aligned_allocator<>{}, std::forward<CompletionToken>(token));
@@ -201,10 +234,51 @@ namespace aero::net {
         this);
     }
 
+    std::error_code shutdown() {
+      std::error_code shutdown_ec;
+      std::error_code close_ec;
+
+#if AERO_USE_TLS
+      if (is_using_tls_stream()) {
+        static_cast<void>(tls_stream_->shutdown(shutdown_ec));
+        if (is_ignorable_close_error(shutdown_ec)) {
+          shutdown_ec.clear();
+        }
+      }
+#endif
+
+      static_cast<void>(socket_.close(close_ec));
+      if (is_ignorable_close_error(close_ec)) {
+        close_ec.clear();
+      }
+
+      return shutdown_ec ? shutdown_ec : close_ec;
+    }
+
     template <typename MutableBuffersSequence, typename CompletionToken>
     auto async_read_some(const MutableBuffersSequence& buffers, CompletionToken&& token) {
       auto bound_token = asio::bind_allocator(aero::detail::aligned_allocator<>{}, std::forward<CompletionToken>(token));
       return asio::async_initiate<void(std::error_code, std::size_t)>(initiate_async_read_some{this}, bound_token, buffers);
+    }
+
+    template <typename MutableBuffersSequence>
+    std::size_t read_some(const MutableBuffersSequence& buffers) {
+#if AERO_USE_TLS
+      if (is_using_tls_stream()) {
+        return tls_stream_->read_some(buffers);
+      }
+#endif
+      return socket_.read_some(buffers);
+    }
+
+    template <typename MutableBuffersSequence>
+    std::size_t read_some(const MutableBuffersSequence& buffers, std::error_code& ec) {
+#if AERO_USE_TLS
+      if (is_using_tls_stream()) {
+        return tls_stream_->read_some(buffers, ec);
+      }
+#endif
+      return socket_.read_some(buffers, ec);
     }
 
     template <typename CompletionToken>
@@ -213,12 +287,32 @@ namespace aero::net {
       return asio::async_initiate<void(std::error_code, std::size_t)>(initiate_async_write{this}, bound_token, buffer);
     }
 
+    template <typename ConstBufferSequence>
+    std::size_t write_some(const ConstBufferSequence& buffers) {
+#if AERO_USE_TLS
+      if (is_using_tls_stream()) {
+        return tls_stream_->write_some(buffers);
+      }
+#endif
+      return socket_.write_some(buffers);
+    }
+
+    template <typename ConstBufferSequence>
+    std::size_t write_some(const ConstBufferSequence& buffers, std::error_code& ec) {
+#if AERO_USE_TLS
+      if (is_using_tls_stream()) {
+        return tls_stream_->write_some(buffers, ec);
+      }
+#endif
+      return socket_.write_some(buffers, ec);
+    }
+
     [[nodiscard]] typename deferred_tcp_socket::lowest_layer_type& lowest_layer() {
       // tcp::socket is a basic_socket, which declares lowest_layer_type as
       // itself, because basic_socket_type is always a lowest_layer.
       // asio::ssl::stream<tcp::socket> declares lowest_layer_type as
-      // tcp::socket. This is important because it means that both branches will
-      // always have the same return type in our case.
+      // tcp::socket. This is important because it means that both branches
+      // will always have the same return type in our case.
 #if AERO_USE_TLS
       if (is_using_tls_stream()) {
         return tls_stream_->lowest_layer();
@@ -251,6 +345,39 @@ namespace aero::net {
 #endif
         ;
     }
+
+#if AERO_USE_TLS
+    std::error_code transform_handshake_error(std::error_code handshake_ec, tls::detail::alert_capture& alerts) noexcept {
+      using tls::detail::x509_verify_error;
+
+#ifdef AERO_USE_WOLFSSL
+      if (handshake_ec) {
+        auto wolfssl_error = ::SSL_get_error(tls_stream_->native_handle(), 0);
+        if (auto cert_error = tls::detail::wolfssl_error_to_cert_error(wolfssl_error)) {
+          return cert_error.value();
+        }
+      }
+#endif
+
+      auto verify_result = static_cast<x509_verify_error>(::SSL_get_verify_result(tls_stream_->native_handle()));
+      if (verify_result != x509_verify_error::ok) {
+        auto cert_error = tls::detail::verify_error_to_cert_error(verify_result);
+        if (cert_error) {
+          return cert_error.value();
+        }
+      }
+
+      auto alert = alerts.get_last_tls_alert();
+      if (alert) {
+        auto alert_ec = tls::detail::tls_alert_to_error_code(*alert);
+        if (alert_ec) {
+          return alert_ec.value();
+        }
+      }
+
+      return handshake_ec;
+    }
+#endif
 
     // Timeout adapters use executor exposed by the operation's initiation,
     // so initiator type should expose executor_type and .get_executor().

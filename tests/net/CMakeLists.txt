@@ -1,1 +1,3 @@
 aero_add_unit_test(aero_net_transport transport.cpp)
+aero_add_unit_test(aero_net_transport_blocking transport_blocking.cpp)
+aero_add_tls_unit_test(aero_net_transport_blocking_tls transport_blocking_tls.cpp)
