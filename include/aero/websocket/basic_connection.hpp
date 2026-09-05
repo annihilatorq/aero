@@ -648,14 +648,30 @@ namespace aero::websocket {
       return connect(urls::url::parse(url_string), std::move(headers));
     }
 
-    // Caller must ensure that given buffer remains valid until the operation is completed
     std::error_code send_text(std::string_view text) {
-      return synchronize_awaitable<std::error_code>(async_send_text(text, return_as_awaitable_tuple()));
+      if (!is_current_state(state::open) || is_close_received()) {
+        return protocol_error::connection_closed;
+      }
+
+      auto frame = client_frame_builder_.build_text_frame(text);
+      if (!frame) {
+        return frame.error();
+      }
+
+      return write_bytes(*frame);
     }
 
-    // Caller must ensure that given buffer remains valid until the operation is completed
     std::error_code send_binary(std::span<const std::byte> data) {
-      return synchronize_awaitable<std::error_code>(async_send_binary(data, return_as_awaitable_tuple()));
+      if (!is_current_state(state::open) || is_close_received()) {
+        return protocol_error::connection_closed;
+      }
+
+      auto frame = client_frame_builder_.build_binary_frame(data);
+      if (!frame) {
+        return frame.error();
+      }
+
+      return write_bytes(*frame);
     }
 
     std::error_code ping(std::span<const std::byte> data) {

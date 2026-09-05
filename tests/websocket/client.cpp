@@ -1,3 +1,4 @@
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -16,6 +17,7 @@
 
 #include <asio/as_tuple.hpp>
 #include <asio/bind_cancellation_slot.hpp>
+#include <asio/buffer.hpp>
 #include <asio/cancellation_signal.hpp>
 #include <asio/error.hpp>
 #include <asio/post.hpp>
@@ -413,6 +415,62 @@ int main() {
       auto ping_ec = client.ping(to_bytes("keepalive"));
 
       expect(ping_ec == websocket::protocol_error::connection_closed);
+    };
+
+    "send_text sends a masked text frame carrying the given text"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      std::vector<std::byte> received_payload;
+      std::latch frame_received{1};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+        received_payload = read_masked_frame_payload(*conn, opcode::text);
+        frame_received.count_down();
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      auto send_ec = client.send_text("hello");
+      expect(not static_cast<bool>(send_ec)) << "send_text failed: " << send_ec.message();
+
+      frame_received.wait();
+      expect(to_string(received_payload) == "hello") << "text payload must reach the peer unchanged";
+    };
+
+    "send_binary sends a masked binary frame carrying the given bytes"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      std::vector<std::byte> received_payload;
+      std::latch frame_received{1};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+        received_payload = read_masked_frame_payload(*conn, opcode::binary);
+        frame_received.count_down();
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      std::vector<std::byte> payload{std::byte{0x00}, std::byte{0x01}, std::byte{0xFF}};
+      auto send_ec = client.send_binary(payload);
+      expect(not static_cast<bool>(send_ec)) << "send_binary failed: " << send_ec.message();
+
+      frame_received.wait();
+      expect(received_payload == payload) << "binary payload must reach the peer unchanged";
+    };
+
+    "send_text returns connection_closed before connect"_test = [&] {
+      websocket::client client;
+      auto send_ec = client.send_text("hello");
+
+      expect(send_ec == websocket::protocol_error::connection_closed);
     };
 
     "read returns message_too_big and fails the connection with close code 1009 when a message exceeds max_message_size"_test =
