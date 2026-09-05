@@ -740,6 +740,40 @@ int main() {
       expect(close_ec == websocket::protocol_error::connection_closed);
     };
 
+    "force_close closes the transport without sending a close frame"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      std::error_code peer_read_ec;
+      std::latch peer_finished{1};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+
+        std::array<char, 1> sink{};
+        conn->socket.read_some(asio::buffer(sink), peer_read_ec);
+        peer_finished.count_down();
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      auto force_close_ec = client.force_close();
+      expect(not static_cast<bool>(force_close_ec)) << "force_close failed: " << force_close_ec.message();
+      expect(client.is_closed());
+
+      peer_finished.wait();
+      expect(peer_read_ec == asio::error::eof) << "peer must see eof without a close frame, got: " << peer_read_ec.message();
+    };
+
+    "force_close before connect succeeds"_test = [&] {
+      websocket::client client;
+
+      expect(client.force_close() == std::error_code{});
+      expect(client.is_closed());
+    };
+
     "test server handled all requests without throwing"_test = [&] {
       expect(server.exception() == nullptr);
     };

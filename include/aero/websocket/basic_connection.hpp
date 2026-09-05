@@ -3,7 +3,6 @@
 #include <atomic>
 #include <chrono>
 #include <expected>
-#include <future>
 #include <optional>
 #include <span>
 #include <string>
@@ -20,14 +19,11 @@
 #include <asio/cancel_after.hpp>
 #include <asio/cancellation_state.hpp>
 #include <asio/co_composed.hpp>
-#include <asio/co_spawn.hpp>
 #include <asio/error.hpp>
 #include <asio/ip/tcp.hpp>
 #include <asio/read_until.hpp>
 #include <asio/steady_timer.hpp>
 #include <asio/strand.hpp>
-#include <asio/use_awaitable.hpp>
-#include <asio/use_future.hpp>
 
 #include "aero/default_executor.hpp"
 #include "aero/detail/aligned_allocator.hpp"
@@ -754,7 +750,7 @@ namespace aero::websocket {
     }
 
     std::error_code force_close() {
-      return synchronize_awaitable<std::error_code>(async_force_close(return_as_awaitable_tuple()));
+      return finalize_session();
     }
 
     std::expected<websocket::message, std::error_code> read() {
@@ -872,10 +868,6 @@ namespace aero::websocket {
    private:
     static asio::as_tuple_t<asio::deferred_t> return_as_deferred_tuple() {
       return asio::as_tuple(asio::deferred);
-    }
-
-    static asio::as_tuple_t<asio::use_awaitable_t<>> return_as_awaitable_tuple() {
-      return asio::as_tuple(asio::use_awaitable);
     }
 
     static bool is_canceled(std::error_code ec) {
@@ -1300,43 +1292,6 @@ namespace aero::websocket {
 
     asio::mutable_buffer get_mutable_read_buffer() {
       return {read_buffer_.data(), read_buffer_.size()};
-    }
-
-    template <typename ResultT, typename F>
-      requires(not std::same_as<ResultT, std::error_code>)
-    std::tuple<std::error_code, ResultT> synchronize_awaitable(F&& awaitable) {
-      if (strand_.running_in_this_thread()) {
-        return {aero::basic_error::deadlock_would_occur, {}};
-      }
-
-      try {
-        return asio::co_spawn(strand_, std::forward<F>(awaitable), asio::use_future).get();
-      } catch (const std::system_error& e) {
-        return {e.code(), {}};
-      } catch (const std::future_error& e) {
-        return {e.code(), {}};
-      } catch (...) {
-        return {make_error_code(std::errc::io_error), {}};
-      }
-    }
-
-    template <typename ResultT, typename F>
-      requires(std::same_as<ResultT, std::error_code>)
-    std::error_code synchronize_awaitable(F&& awaitable) {
-      if (strand_.running_in_this_thread()) {
-        return aero::basic_error::deadlock_would_occur;
-      }
-
-      try {
-        auto [ec] = asio::co_spawn(strand_, std::forward<F>(awaitable), asio::use_future).get();
-        return ec;
-      } catch (const std::system_error& e) {
-        return e.code();
-      } catch (const std::future_error& e) {
-        return e.code();
-      } catch (...) {
-        return make_error_code(std::errc::io_error);
-      }
     }
 
     asio::strand<executor_type> strand_;
