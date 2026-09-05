@@ -175,7 +175,11 @@ namespace aero::net {
         std::error_code resolve_ec;
         auto resolved_endpoints = resolver.resolve(host, std::to_string(port), resolve_ec);
         if (resolve_ec) {
-          return resolve_ec;
+          if (resolve_ec == asio::error::bad_descriptor) {
+            return connect_error::host_invalid;
+          }
+
+          return connect_error::host_resolve_failed;
         }
 
         asio::connect(socket_, resolved_endpoints, connect_ec);

@@ -16,6 +16,7 @@
 
 #include <ut/ut.hpp>
 
+#include "aero/net/error.hpp"
 #include "aero/net/transport.hpp"
 
 #include "net/blocking_server.hpp"
@@ -78,7 +79,7 @@ int main() {
       auto transport = make_transport();
 
       auto ec = transport.connect("nonexistent.invalid.aero", 80);
-      expect(static_cast<bool>(ec)) << "connect succeeded for a host name that cannot resolve";
+      expect(ec == aero::net::connect_error::host_resolve_failed) << "got: " << ec.message();
       expect(not transport.is_open());
     };
   };
