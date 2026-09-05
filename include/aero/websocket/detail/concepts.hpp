@@ -104,18 +104,8 @@ namespace aero::websocket::concepts {
       } -> std::same_as<asio::awaitable<std::tuple<std::error_code, websocket::message>>>;
 
       { client.connect(url, handshake_headers) } -> std::same_as<std::tuple<std::error_code, http::response>>;
-      { client.connect(url, handshake_headers, timeout) } -> std::same_as<std::tuple<std::error_code, http::response>>;
       { client.connect(parsed_url, handshake_headers) } -> std::same_as<std::tuple<std::error_code, http::response>>;
-      { client.connect(parsed_url, handshake_headers, timeout) } -> std::same_as<std::tuple<std::error_code, http::response>>;
       { client.connect(url_string, handshake_headers) } -> std::same_as<std::tuple<std::error_code, http::response>>;
-      { client.connect(url_string, handshake_headers, timeout) } -> std::same_as<std::tuple<std::error_code, http::response>>;
-
-      { client.connect(url) } -> std::same_as<std::tuple<std::error_code, http::response>>;
-      { client.connect(url, timeout) } -> std::same_as<std::tuple<std::error_code, http::response>>;
-      { client.connect(parsed_url) } -> std::same_as<std::tuple<std::error_code, http::response>>;
-      { client.connect(parsed_url, timeout) } -> std::same_as<std::tuple<std::error_code, http::response>>;
-      { client.connect(url_string) } -> std::same_as<std::tuple<std::error_code, http::response>>;
-      { client.connect(url_string, timeout) } -> std::same_as<std::tuple<std::error_code, http::response>>;
 
       { client.send_text(text) } -> std::same_as<std::error_code>;
       { client.send_binary(bytes) } -> std::same_as<std::error_code>;
@@ -124,16 +114,15 @@ namespace aero::websocket::concepts {
       { client.ping(text) } -> std::same_as<std::error_code>;
       { client.ping(bytes) } -> std::same_as<std::error_code>;
 
-      { client.pong() } -> std::same_as<std::error_code>;
-      { client.pong(text) } -> std::same_as<std::error_code>;
       { client.pong(bytes) } -> std::same_as<std::error_code>;
+      { client.pong(text) } -> std::same_as<std::error_code>;
+      { client.pong() } -> std::same_as<std::error_code>;
 
       { client.close(close_code) } -> std::same_as<std::error_code>;
       { client.close(close_code, close_reason) } -> std::same_as<std::error_code>;
       { client.force_close() } -> std::same_as<std::error_code>;
 
       { client.read() } -> std::same_as<std::expected<websocket::message, std::error_code>>;
-      { client.read(timeout) } -> std::same_as<std::expected<websocket::message, std::error_code>>;
 
       { client.is_open_for_writing() } -> std::same_as<bool>;
       { client.is_connecting() } -> std::same_as<bool>;

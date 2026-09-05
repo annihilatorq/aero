@@ -1,6 +1,5 @@
 #include <print>
 
-#include "aero/error.hpp"
 #include "aero/tls/system_context.hpp"
 #include "aero/tls/version.hpp"
 #include "aero/util/deadline.hpp"
@@ -34,7 +33,7 @@ int main() {
 
   websocket::client client{tls_ctx.context()};
 
-  auto [connect_ec, handshake_resp] = client.connect("wss://stream.binance.com:9443/ws/btcusdt@trade", 5s);
+  auto [connect_ec, handshake_resp] = client.connect("wss://stream.binance.com:9443/ws/btcusdt@trade");
   if (connect_ec) {
     print_error("Connect to binance stream failed", connect_ec);
     return 1;
@@ -50,12 +49,8 @@ int main() {
       break;
     }
 
-    auto message = client.read(deadline.remaining());
+    auto message = client.read();
     if (!message) {
-      if (message.error() == aero::errc::timeout && deadline.expired()) {
-        std::println("Read deadline expired, breaking from read-loop");
-        break;
-      }
       print_error("Failed to receive message from binance stream", message.error());
       break;
     }

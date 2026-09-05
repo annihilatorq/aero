@@ -36,16 +36,10 @@ void print_message(const websocket::message& message) {
 }
 
 int main() {
-  using namespace std::chrono_literals;
   websocket::client client;
 
-  auto [connect_ec, handshake_resp] = client.connect("ws://websockets.chilkat.io/wsChilkatEcho.ashx", 5s);
+  auto [connect_ec, handshake_resp] = client.connect("ws://websockets.chilkat.io/wsChilkatEcho.ashx");
   if (connect_ec) {
-    if (connect_ec == aero::errc::timeout) {
-      print_error("Connect to echo server timed out", connect_ec);
-      return 1;
-    }
-
     print_error("Connect to echo server failed", connect_ec);
     return 1;
   }
@@ -56,7 +50,7 @@ int main() {
     return 1;
   }
 
-  auto read_result = client.read(1500ms);
+  auto read_result = client.read();
   if (!read_result.has_value()) {
     print_error("Read failed", read_result.error());
     return 1;

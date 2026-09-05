@@ -1,3 +1,4 @@
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -16,6 +17,7 @@
 
 #include <asio/as_tuple.hpp>
 #include <asio/bind_cancellation_slot.hpp>
+#include <asio/buffer.hpp>
 #include <asio/cancellation_signal.hpp>
 #include <asio/error.hpp>
 #include <asio/post.hpp>
@@ -28,6 +30,7 @@
 #include "aero/http/headers.hpp"
 #include "aero/http/status.hpp"
 #include "aero/http/status_line.hpp"
+#include "aero/urls/url.hpp"
 #include "aero/util/deadline.hpp"
 #include "aero/util/final_action.hpp"
 #include "aero/websocket/client.hpp"
@@ -45,8 +48,12 @@ using namespace ut;
 namespace http = aero::http;
 namespace websocket = aero::websocket;
 
+using aero::tests::websocket::serialize_close_payload;
 using aero::tests::websocket::serialize_unmasked_frame;
+using aero::tests::websocket::to_bytes;
 using aero::tests::websocket::to_string;
+using aero::tests::websocket::unmask_payload;
+using aero::websocket::detail::masking_key;
 using aero::websocket::detail::opcode;
 using namespace std::chrono_literals;
 
@@ -85,27 +92,33 @@ namespace {
     return response;
   }
 
-  std::uint16_t read_masked_close_code(connection& conn) {
-    auto header = conn.read_bytes(2);
-    auto first_byte = static_cast<std::uint8_t>(header[0]);
-    auto second_byte = static_cast<std::uint8_t>(header[1]);
+  std::vector<std::byte> read_masked_frame_payload(connection& conn, opcode expected_opcode) {
+    auto header = to_bytes(conn.read_bytes(2));
+    auto first_byte = std::to_integer<std::uint8_t>(header[0]);
+    auto second_byte = std::to_integer<std::uint8_t>(header[1]);
 
-    if ((first_byte & 0x0FU) != 0x08U) {
-      throw std::runtime_error{"expected a close frame"};
+    if ((first_byte & 0x0FU) != static_cast<std::uint8_t>(expected_opcode)) {
+      throw std::runtime_error{"unexpected frame opcode"};
+    }
+    if ((second_byte & 0x80U) == 0U) {
+      throw std::runtime_error{"expected a masked frame"};
     }
 
     auto payload_length = static_cast<std::size_t>(second_byte & 0x7FU);
-    if ((second_byte & 0x80U) == 0U || payload_length < 2U) {
-      throw std::runtime_error{"expected a masked close frame carrying a close code"};
+    auto key_bytes = to_bytes(conn.read_bytes(4));
+    masking_key key{key_bytes[0], key_bytes[1], key_bytes[2], key_bytes[3]};
+
+    return unmask_payload(to_bytes(conn.read_bytes(payload_length)), key);
+  }
+
+  std::uint16_t read_masked_close_code(connection& conn) {
+    auto payload = read_masked_frame_payload(conn, opcode::close);
+    if (payload.size() < 2U) {
+      throw std::runtime_error{"expected a close frame carrying a close code"};
     }
 
-    auto mask = conn.read_bytes(4);
-    auto payload = conn.read_bytes(payload_length);
-    auto unmasked = [&](std::size_t index) {
-      return static_cast<std::uint8_t>(static_cast<std::uint8_t>(payload[index]) ^ static_cast<std::uint8_t>(mask[index % 4U]));
-    };
-
-    return static_cast<std::uint16_t>((unmasked(0) << 8U) | unmasked(1));
+    return static_cast<std::uint16_t>(
+      (std::to_integer<std::uint8_t>(payload[0]) << 8U) | std::to_integer<std::uint8_t>(payload[1]));
   }
 
 } // namespace
@@ -290,12 +303,184 @@ int main() {
       expect(connect_ec == aero::urls::url_error::authority_invalid);
     };
 
+    "connect accepts a urls::url value"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+      });
+
+      auto parsed_url = aero::urls::url::parse(url_str);
+      require(parsed_url.has_value());
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(std::move(*parsed_url));
+
+      expect(not static_cast<bool>(connect_ec)) << "connect with a urls::url failed: " << connect_ec.message();
+      expect(response.status_code() == http::status::switching_protocols);
+    };
+
+    "connect accepts the std::expected result of urls::url::parse"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(aero::urls::url::parse(url_str));
+
+      expect(not static_cast<bool>(connect_ec)) << "connect with a parse result failed: " << connect_ec.message();
+      expect(response.status_code() == http::status::switching_protocols);
+    };
+
+    "connect reports connection_refused when nothing is listening and a retry succeeds"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      std::uint16_t unused_port = 0;
+      {
+        asio::io_context probe_context;
+        tcp::acceptor probe{probe_context, tcp::endpoint(asio::ip::make_address("127.0.0.1"), 0)};
+        unused_port = probe.local_endpoint().port();
+      }
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+      });
+
+      websocket::client client;
+      auto [refused_ec, refused_response] = client.connect("ws://127.0.0.1:" + std::to_string(unused_port) + "/socket");
+
+      expect(refused_ec == asio::error::connection_refused)
+        << "connect to a port with no listener should be refused, got: " << refused_ec.message();
+      expect(client.is_closed()) << "failed connect must return the connection to the closed state";
+
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec)) << "connect after a refused attempt failed: " << connect_ec.message();
+      expect(response.status_code() == http::status::switching_protocols);
+    };
+
+    "read returns the message the server sent in the same packet as the handshake response"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        auto response = make_websocket_switching_response(raw_request);
+        response += to_string(serialize_unmasked_frame(opcode::text, true, to_bytes("hello")));
+        conn->write_response(response);
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      auto message = client.read();
+      expect(message.has_value()) << "frame bytes received together with the handshake must reach the reader";
+      if (not message.has_value()) {
+        return;
+      }
+
+      expect(message->is_text());
+      expect(to_string(message->payload) == "hello");
+    };
+
+    "ping sends a masked ping frame carrying the given bytes"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      std::vector<std::byte> received_payload;
+      std::latch ping_received{1};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+        received_payload = read_masked_frame_payload(*conn, opcode::ping);
+        ping_received.count_down();
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      auto ping_ec = client.ping(to_bytes("keepalive"));
+      expect(not static_cast<bool>(ping_ec)) << "ping failed: " << ping_ec.message();
+
+      ping_received.wait();
+      expect(to_string(received_payload) == "keepalive") << "ping payload must reach the peer unchanged";
+    };
+
+    "ping with bytes returns connection_closed before connect"_test = [&] {
+      websocket::client client;
+      auto ping_ec = client.ping(to_bytes("keepalive"));
+
+      expect(ping_ec == websocket::protocol_error::connection_closed);
+    };
+
+    "send_text sends a masked text frame carrying the given text"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      std::vector<std::byte> received_payload;
+      std::latch frame_received{1};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+        received_payload = read_masked_frame_payload(*conn, opcode::text);
+        frame_received.count_down();
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      auto send_ec = client.send_text("hello");
+      expect(not static_cast<bool>(send_ec)) << "send_text failed: " << send_ec.message();
+
+      frame_received.wait();
+      expect(to_string(received_payload) == "hello") << "text payload must reach the peer unchanged";
+    };
+
+    "send_binary sends a masked binary frame carrying the given bytes"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      std::vector<std::byte> received_payload;
+      std::latch frame_received{1};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+        received_payload = read_masked_frame_payload(*conn, opcode::binary);
+        frame_received.count_down();
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      std::vector<std::byte> payload{std::byte{0x00}, std::byte{0x01}, std::byte{0xFF}};
+      auto send_ec = client.send_binary(payload);
+      expect(not static_cast<bool>(send_ec)) << "send_binary failed: " << send_ec.message();
+
+      frame_received.wait();
+      expect(received_payload == payload) << "binary payload must reach the peer unchanged";
+    };
+
+    "send_text returns connection_closed before connect"_test = [&] {
+      websocket::client client;
+      auto send_ec = client.send_text("hello");
+
+      expect(send_ec == websocket::protocol_error::connection_closed);
+    };
+
     "read returns message_too_big and fails the connection with close code 1009 when a message exceeds max_message_size"_test =
       [&] {
         aero::final_action cleanup{[&] { server.close_last_conn(); }};
 
         constexpr std::size_t max_message_size = 16;
         std::uint16_t received_close_code = 0;
+        std::latch close_received{1};
 
         server.on_accept([&](std::shared_ptr<connection> conn) {
           auto raw_request = conn->read_request();
@@ -305,6 +490,7 @@ int main() {
           conn->write_response(to_string(serialize_unmasked_frame(opcode::binary, true, oversized)));
 
           received_close_code = read_masked_close_code(*conn);
+          close_received.count_down();
           conn->close();
         });
 
@@ -313,6 +499,8 @@ int main() {
         expect(not static_cast<bool>(connect_ec));
 
         auto message = client.read();
+        close_received.wait();
+
         expect(!message.has_value() && message.error() == websocket::protocol_error::message_too_big);
         expect(client.is_closed()) << "an oversized message must fail the connection, not leave it open for reuse";
         expect(received_close_code == 1009U)
@@ -442,6 +630,152 @@ int main() {
 
       expect(client.is_closed()) << "connection should be closed after 3 seconds of server sending small packets while client "
                                     "was draining its transport";
+    };
+
+    "close sends a masked close frame and returns once the peer's close reply arrives"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      std::uint16_t received_close_code = 0;
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+
+        received_close_code = read_masked_close_code(*conn);
+        auto close_reply = serialize_close_payload(websocket::close_code::normal, {});
+        conn->write_response(to_string(serialize_unmasked_frame(opcode::close, true, close_reply)));
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      auto close_ec = client.close(websocket::close_code::normal);
+      expect(not static_cast<bool>(close_ec)) << "close failed: " << close_ec.message();
+      expect(client.is_closed()) << "connection must be closed after the close handshake";
+      expect(received_close_code == 1000U) << "close frame should carry close code 1000, got: " << received_close_code;
+    };
+
+    "close returns eof and closes the connection when the peer drops TCP instead of replying"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+
+        std::ignore = read_masked_close_code(*conn);
+        conn->close();
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      auto close_ec = client.close(websocket::close_code::normal);
+      expect(close_ec == asio::error::eof) << "got: " << close_ec.message();
+      expect(client.is_closed()) << "lost transport must leave the connection closed";
+    };
+
+    "close with reason sends the code and reason in the close frame"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      std::vector<std::byte> received_payload;
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+
+        received_payload = read_masked_frame_payload(*conn, opcode::close);
+        auto close_reply = serialize_close_payload(websocket::close_code::normal, {});
+        conn->write_response(to_string(serialize_unmasked_frame(opcode::close, true, close_reply)));
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      auto close_ec = client.close(websocket::close_code::going_away, "bye");
+      expect(not static_cast<bool>(close_ec)) << "close failed: " << close_ec.message();
+      expect(client.is_closed());
+
+      auto expected_payload = serialize_close_payload(websocket::close_code::going_away, to_bytes("bye"));
+      expect(received_payload == expected_payload)
+        << "close payload must be the code followed by the reason, got: " << to_string(received_payload);
+    };
+
+    "close with a reason longer than 123 bytes returns control_frame_payload_too_big and closes the connection"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      auto close_ec = client.close(websocket::close_code::normal, std::string(124, 'x'));
+      expect(close_ec == websocket::protocol_error::control_frame_payload_too_big) << "got: " << close_ec.message();
+      expect(client.is_closed()) << "close that could not send its frame must still tear the connection down";
+    };
+
+    "close with a reason that is not valid utf-8 returns close_reason_invalid_utf8 and closes the connection"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      auto close_ec = client.close(websocket::close_code::normal, "\xC3\x28");
+      expect(close_ec == websocket::protocol_error::close_reason_invalid_utf8) << "got: " << close_ec.message();
+      expect(client.is_closed()) << "close that could not send its frame must still tear the connection down";
+    };
+
+    "close returns connection_closed before connect"_test = [&] {
+      websocket::client client;
+      auto close_ec = client.close(websocket::close_code::normal);
+
+      expect(close_ec == websocket::protocol_error::connection_closed);
+    };
+
+    "force_close closes the transport without sending a close frame"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      std::error_code peer_read_ec;
+      std::latch peer_finished{1};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+
+        std::array<char, 1> sink{};
+        conn->socket.read_some(asio::buffer(sink), peer_read_ec);
+        peer_finished.count_down();
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      auto force_close_ec = client.force_close();
+      expect(not static_cast<bool>(force_close_ec)) << "force_close failed: " << force_close_ec.message();
+      expect(client.is_closed());
+
+      peer_finished.wait();
+      expect(peer_read_ec == asio::error::eof) << "peer must see eof without a close frame, got: " << peer_read_ec.message();
+    };
+
+    "force_close before connect succeeds"_test = [&] {
+      websocket::client client;
+
+      expect(client.force_close() == std::error_code{});
+      expect(client.is_closed());
     };
 
     "test server handled all requests without throwing"_test = [&] {

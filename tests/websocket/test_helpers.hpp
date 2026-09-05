@@ -67,6 +67,17 @@ namespace aero::tests::websocket {
     };
   }
 
+  inline std::vector<std::byte> unmask_payload(std::span<const std::byte> masked_payload, masking_key key) {
+    std::vector<std::byte> unmasked;
+    unmasked.resize(masked_payload.size());
+    for (std::size_t i{}; i < masked_payload.size(); ++i) {
+      const auto masked_value = std::to_integer<std::uint8_t>(masked_payload[i]);
+      const auto key_value = std::to_integer<std::uint8_t>(key[i % 4U]);
+      unmasked[i] = std::byte{static_cast<std::uint8_t>(masked_value ^ key_value)};
+    }
+    return unmasked;
+  }
+
   inline std::array<std::byte, 2> make_network_u16(std::uint16_t value) {
     return big_endian_bytes<2>(value);
   }
