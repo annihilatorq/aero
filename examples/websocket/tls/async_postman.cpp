@@ -4,6 +4,7 @@
 #include <system_error>
 
 #include <asio/awaitable.hpp>
+#include <asio/co_spawn.hpp>
 #include <asio/use_awaitable.hpp>
 #include <asio/use_future.hpp>
 
