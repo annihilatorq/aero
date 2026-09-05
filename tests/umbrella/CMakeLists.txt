@@ -1,0 +1,6 @@
+aero_add_unit_test(aero_umbrella_aero aero.cpp)
+aero_add_unit_test(aero_umbrella_http http.cpp)
+aero_add_unit_test(aero_umbrella_net net.cpp)
+aero_add_tls_unit_test(aero_umbrella_tls tls.cpp)
+aero_add_unit_test(aero_umbrella_urls urls.cpp)
+aero_add_unit_test(aero_umbrella_websocket websocket.cpp)

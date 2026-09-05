@@ -8,4 +8,6 @@
 #include "aero/websocket/detail/concepts.hpp"
 #include "aero/websocket/error.hpp"
 #include "aero/websocket/message.hpp"
+#include "aero/websocket/port.hpp"
+#include "aero/websocket/role.hpp"
 #include "aero/websocket/state.hpp"

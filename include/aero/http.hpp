@@ -1,5 +1,6 @@
 #pragma once
 
+#include "aero/http/context.hpp"
 #include "aero/http/error.hpp"
 #include "aero/http/headers.hpp"
 #include "aero/http/method.hpp"
