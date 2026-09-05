@@ -590,8 +590,9 @@ namespace aero::websocket {
         return {handshake.error(), {}};
       }
 
+      auto request_bytes = handshake->bytes();
       std::error_code write_ec;
-      asio::write(*transport_, asio::buffer(handshake->bytes()), write_ec);
+      asio::write(*transport_, asio::buffer(request_bytes.data(), request_bytes.size()), write_ec);
       if (write_ec) {
         std::ignore = finalize_session();
         return {write_ec, {}};
@@ -971,7 +972,7 @@ namespace aero::websocket {
 
     std::error_code write_bytes(std::span<const std::byte> frame) {
       std::error_code write_ec;
-      std::size_t bytes_written = asio::write(*transport_, asio::buffer(frame), write_ec);
+      std::size_t bytes_written = asio::write(*transport_, asio::buffer(frame.data(), frame.size()), write_ec);
       if (!write_ec) {
         return std::error_code{};
       }
