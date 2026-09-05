@@ -42,7 +42,6 @@ namespace aero::tests::net {
     }
 
     void join() {
-      io_context_.stop();
       if (thread_.joinable()) {
         thread_.join();
       }
