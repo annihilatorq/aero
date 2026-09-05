@@ -480,6 +480,7 @@ int main() {
 
         constexpr std::size_t max_message_size = 16;
         std::uint16_t received_close_code = 0;
+        std::latch close_received{1};
 
         server.on_accept([&](std::shared_ptr<connection> conn) {
           auto raw_request = conn->read_request();
@@ -489,6 +490,7 @@ int main() {
           conn->write_response(to_string(serialize_unmasked_frame(opcode::binary, true, oversized)));
 
           received_close_code = read_masked_close_code(*conn);
+          close_received.count_down();
           conn->close();
         });
 
@@ -497,6 +499,8 @@ int main() {
         expect(not static_cast<bool>(connect_ec));
 
         auto message = client.read();
+        close_received.wait();
+
         expect(!message.has_value() && message.error() == websocket::protocol_error::message_too_big);
         expect(client.is_closed()) << "an oversized message must fail the connection, not leave it open for reuse";
         expect(received_close_code == 1009U)
