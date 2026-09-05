@@ -54,7 +54,7 @@ struct connection {
   void close() {
     std::error_code ec;
     static_cast<void>(socket.shutdown(asio::socket_base::shutdown_both, ec));
-    static_cast<void>(socket.close(), ec);
+    static_cast<void>(socket.close(ec));
   }
 
  private:
