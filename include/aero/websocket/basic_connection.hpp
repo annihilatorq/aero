@@ -1,6 +1,5 @@
 #pragma once
 
-#include <asio/buffer.hpp>
 #include <atomic>
 #include <chrono>
 #include <expected>
@@ -17,6 +16,7 @@
 #include <asio/as_tuple.hpp>
 #include <asio/async_result.hpp>
 #include <asio/bind_allocator.hpp>
+#include <asio/buffer.hpp>
 #include <asio/cancel_after.hpp>
 #include <asio/cancellation_state.hpp>
 #include <asio/co_composed.hpp>
@@ -64,6 +64,7 @@ namespace aero::websocket {
     using protocol_error = websocket::protocol_error;
     constexpr static std::span<const std::byte> null_bytes{};
     constexpr static std::chrono::seconds default_close_timeout{5};
+    constexpr static std::chrono::seconds transport_drain_deadline{1};
 
    public:
     using transport_type = aero::net::transport;
@@ -705,6 +706,7 @@ namespace aero::websocket {
 
     std::error_code close(websocket::close_code code, std::string_view reason) {
       return synchronize_awaitable<std::error_code>(async_close(code, reason, return_as_awaitable_tuple()));
+      return {};
     }
 
     std::error_code force_close() {
@@ -712,22 +714,87 @@ namespace aero::websocket {
     }
 
     std::expected<websocket::message, std::error_code> read() {
-      auto [read_ec, message] = synchronize_awaitable<websocket::message>(async_read(return_as_awaitable_tuple()));
-      if (read_ec) {
-        return std::unexpected(read_ec);
+      if (read_buffer_.capacity() == 0) {
+        read_buffer_.resize(max_read_buffer_size_);
       }
 
-      return message;
-    }
-
-    std::expected<websocket::message, std::error_code> read(duration timeout) {
-      auto [read_ec, message] =
-        synchronize_awaitable<websocket::message>(async_read(asio::cancel_after(timeout, return_as_awaitable_tuple())));
-      if (read_ec) {
-        return std::unexpected(read_ec);
+      // Prevent multiple read operations (one read at a time)
+      if (is_read_loop_active()) {
+        return std::unexpected(protocol_error::already_reading);
       }
 
-      return message;
+      set_read_loop_active_flag(true);
+      aero::final_action on_finish{[this] { set_read_loop_active_flag(false); }};
+
+      for (;;) {
+        // If a close handshake is in progress or connection is closed, stop reading
+        if (is_current_state(state::closed) || is_close_received()) {
+          return std::unexpected(protocol_error::connection_closed);
+        }
+
+        consume_data_received_in_handshake_if_present();
+
+        // Deliver next assembled message if available
+        if (auto message = message_reader_.poll()) {
+          if (message->is_control()) {
+            // Auto-respond to control frames
+            std::error_code response_ec = respond_to_control_message(*message);
+            if (response_ec) {
+              return std::unexpected(response_ec);
+            }
+
+            // Received a close frame - send close reply (if not sent) and finalize session
+            if (message->is_close()) {
+              std::error_code final_ec = finalize_session();
+              if (final_ec) {
+                return std::unexpected(final_ec);
+              }
+              // Return the close message
+              return *message;
+            }
+
+            return *message;
+          }
+
+          if (is_current_state(state::closing) || is_close_sent()) {
+            continue;
+          }
+
+          // Return any non-control or handled control message to the caller
+          return *message;
+        }
+
+        // If a deferred error was stored (e.g. from a previous consume), handle it now
+        if (deferred_read_ec_) {
+          auto deferred_read_ec = *deferred_read_ec_;
+          deferred_read_ec_.reset();
+          if (is_fatal_websocket_error(deferred_read_ec)) {
+            fail_connection(deferred_read_ec);
+          }
+          return std::unexpected(deferred_read_ec);
+        }
+
+        std::error_code read_ec;
+        std::size_t bytes_read = transport_->read_some(get_mutable_read_buffer(), read_ec);
+        if (read_ec) {
+          // Unexpected transport error - fail the WebSocket connection (RFC 6455 7.2.1)
+          std::error_code final_ec = finalize_session(read_ec);
+
+          // Forward unexpected transport errors to a caller for better
+          // understanding of why the transport was closed, who initiated the
+          // closure, whether it was broken unexpectedly, etc.
+          return std::unexpected(final_ec);
+        }
+
+        // Consume incoming bytes into WebSocket frames/messages
+        auto consume_ec = message_reader_.consume(std::span{read_buffer_}.first(bytes_read));
+        if (consume_ec && !deferred_read_ec_) {
+          // Store the first error to report after delivering any remaining message
+          deferred_read_ec_ = consume_ec;
+        }
+
+        // Loop continues to check for assembled messages or handle errors
+      }
     }
 
     [[nodiscard]] bool is_open_for_writing() const noexcept {
@@ -855,7 +922,7 @@ namespace aero::websocket {
             // co_composed received cancellation
             state.reset_cancellation_state(asio::disable_cancellation());
 
-            // RFC6455 - 7.2.1. Client-Initiated Closure:
+            // RFC 6455, Section 7.2.1:
             // If at any point the underlying transport layer connection is
             // unexpectedly lost, the client MUST _Fail the WebSocket Connection_.
             co_return co_await self->async_finalize_session(write_ec, return_as_deferred_tuple());
@@ -873,7 +940,7 @@ namespace aero::websocket {
         return std::error_code{};
       }
 
-      // RFC6455 - 7.2.1. Client-Initiated Closure:
+      // RFC 6455, Section 7.2.1:
       // If at any point the underlying transport layer connection is
       // unexpectedly lost, the client MUST _Fail the WebSocket Connection_.
       return finalize_session(write_ec);
@@ -910,6 +977,25 @@ namespace aero::websocket {
         std::move(reason));
     }
 
+    std::error_code send_close(websocket::close_code code, std::optional<std::string_view> reason = std::nullopt) {
+      if (is_close_sent()) {
+        return std::error_code{};
+      }
+
+      auto close_frame = client_frame_builder_.build_close_frame(code, reason);
+      if (!close_frame) {
+        return close_frame.error();
+      }
+
+      std::error_code write_ec = write_bytes(*close_frame);
+      if (write_ec) {
+        return write_ec;
+      }
+
+      set_close_sent_flag(true);
+      return std::error_code{};
+    }
+
     // Fail fast websocket termination path. Use when we detected a fatal
     // websocket violation (protocol error, invalid payload etc.) and must
     // actively fail the connection. Sends a close frame with the appropriate
@@ -922,7 +1008,6 @@ namespace aero::websocket {
       return asio::async_initiate<decltype(bound_token), void()>(
         asio::co_composed<void()>(
           [](auto, basic_connection* self, std::error_code fatal_ec) -> void {
-            using namespace std::chrono_literals;
             if (!self->is_current_state(state::closed)) {
               self->set_connection_state(state::closing);
             }
@@ -934,7 +1019,7 @@ namespace aero::websocket {
               // An endpoint SHOULD use a method that cleanly closes the TCP
               // connection, as well as the TLS session, if applicable,
               // discarding any trailing bytes that may have been received.
-              aero::deadline drain_deadline{1s};
+              aero::deadline drain_deadline{transport_drain_deadline};
 
               while (!drain_deadline.expired()) {
                 auto [read_ec, bytes_read] = co_await self->transport_->async_read_some(self->get_mutable_read_buffer(),
@@ -959,6 +1044,27 @@ namespace aero::websocket {
         bound_token,
         this,
         fatal_ec);
+    }
+
+    void fail_connection(std::error_code fatal_ec) {
+      if (!is_current_state(state::closed)) {
+        set_connection_state(state::closing);
+      }
+
+      std::error_code send_close_ec = send_close(close_code_for_error(fatal_ec));
+
+      // We will not perform transport drainage on the sync path. This is
+      // merely "desirable" behavior during closure, however, it could
+      // potentially cause blocking and various TLS-related issues if we
+      // decide to use a non-blocking approach
+
+      set_close_received_flag(true);
+      deferred_read_ec_.reset();
+      data_received_in_handshake_.reset();
+      message_reader_.reset();
+
+      // We don't care whether force-shutdown returned an error or not
+      std::ignore = finalize_session(fatal_ec);
     }
 
     // Graceful connection finalization path.
@@ -1010,7 +1116,7 @@ namespace aero::websocket {
 
       reset_connection_state(state::closed);
 
-      auto shutdown_ec = transport_->shutdown();
+      std::error_code shutdown_ec = transport_->shutdown();
       return final_ec ? final_ec : shutdown_ec;
     }
 
@@ -1038,6 +1144,21 @@ namespace aero::websocket {
         bound_token,
         this,
         message);
+    }
+
+    std::error_code respond_to_control_message(const websocket::message& message) {
+      if (message.is_ping()) {
+        return pong(message.payload);
+      }
+
+      if (message.is_close()) {
+        set_close_received_flag(true);
+
+        auto reply_close_code = message.close_code().value_or(close_code::normal);
+        return send_close(reply_close_code, message.close_reason());
+      }
+
+      return std::error_code{};
     }
 
     template <typename... States>
