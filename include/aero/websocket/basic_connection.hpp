@@ -717,12 +717,40 @@ namespace aero::websocket {
     }
 
     std::error_code close(websocket::close_code code) {
-      return synchronize_awaitable<std::error_code>(async_close(code, return_as_awaitable_tuple()));
+      return close(code, "");
     }
 
     std::error_code close(websocket::close_code code, std::string_view reason) {
-      return synchronize_awaitable<std::error_code>(async_close(code, reason, return_as_awaitable_tuple()));
-      return {};
+      if (is_close_code_server_only(code)) {
+        return protocol_error::close_code_server_only;
+      }
+
+      if (is_current_state(state::closed)) {
+        return protocol_error::connection_closed;
+      }
+
+      if (is_current_state(state::closing)) {
+        return protocol_error::already_closing;
+      }
+
+      set_connection_state(state::closing);
+
+      std::error_code send_close_ec = send_close(code, reason);
+      if (send_close_ec) {
+        return finalize_session(send_close_ec);
+      }
+
+      // Read until a close frame is received from the peer
+      for (;;) {
+        auto message = read();
+        if (!message) {
+          return finalize_session(message.error());
+        }
+
+        if (message->is_close()) {
+          return std::error_code{};
+        }
+      }
     }
 
     std::error_code force_close() {
