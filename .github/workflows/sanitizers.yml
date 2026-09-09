@@ -25,11 +25,14 @@ jobs:
           - { name: ASan+UBSan, flags: "-fsanitize=address,undefined" }
           - { name: TSan, flags: "-fsanitize=thread" }
         tls:
-          - { name: No TLS, backend: none }
+          - { name: No TLS,  backend: none }
+          - { name: wolfSSL, backend: wolfssl, vcpkg_port: "wolfssl[asio]" }
+          - { name: OpenSSL, backend: openssl, vcpkg_port: openssl }
 
     env:
       CC: clang-${{ matrix.clang }}
       CXX: clang++-${{ matrix.clang }}
+      VCPKG_DEFAULT_TRIPLET: x64-linux
       ASAN_OPTIONS: "strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1"
       UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
       TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
@@ -50,10 +53,27 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libc++-${{ matrix.clang }}-dev libc++abi-${{ matrix.clang }}-dev libunwind-${{ matrix.clang }}-dev
 
+      - name: Setup vcpkg
+        if: matrix.tls.vcpkg_port
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: 29f10019c26142cc4689b53b8c91da519db09e5c
+
+      - name: Install ${{ matrix.tls.name }} (vcpkg)
+        if: matrix.tls.vcpkg_port
+        run: |
+          "$VCPKG_ROOT/vcpkg" install "${{ matrix.tls.vcpkg_port }}" --triplet "${VCPKG_DEFAULT_TRIPLET}"
+
       - name: Configure CMake
         shell: bash
         run: |
           sanitizer_flags="${{ matrix.sanitizer.flags }} -fno-sanitize-recover=all -fno-omit-frame-pointer"
+
+          vcpkg_cmake_args=()
+          if [[ -n "${{ matrix.tls.vcpkg_port }}" ]]; then
+            vcpkg_cmake_args+=("-DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+            vcpkg_cmake_args+=("-DVCPKG_TARGET_TRIPLET=${VCPKG_DEFAULT_TRIPLET}")
+          fi
 
           cmake -B "${{ github.workspace }}/build-${{ matrix.tls.backend }}" \
             -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
@@ -62,7 +82,8 @@ jobs:
             -DCMAKE_CXX_COMPILER=${{ env.CXX }} \
             -DCMAKE_CXX_FLAGS="-stdlib=libc++ ${sanitizer_flags}" \
             -DCMAKE_EXE_LINKER_FLAGS="-stdlib=libc++ -lc++abi ${sanitizer_flags}" \
-            -DAERO_TLS_BACKEND=${{ matrix.tls.backend }}
+            -DAERO_TLS_BACKEND=${{ matrix.tls.backend }} \
+            "${vcpkg_cmake_args[@]}"
 
       - name: Build
         run: cmake --build "build-${{ matrix.tls.backend }}" --parallel
