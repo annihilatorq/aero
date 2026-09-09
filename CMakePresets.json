@@ -1,0 +1,166 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_CXX_STANDARD": "23",
+        "CMAKE_CXX_STANDARD_REQUIRED": "ON",
+        "CMAKE_CXX_EXTENSIONS": "OFF",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "vcpkg",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Dev, no TLS",
+      "inherits": [
+        "base"
+      ],
+      "cacheVariables": {
+        "AERO_TLS_BACKEND": "none"
+      }
+    },
+    {
+      "name": "dev-wolfssl",
+      "displayName": "Dev, wolfSSL",
+      "inherits": [
+        "base",
+        "vcpkg"
+      ],
+      "cacheVariables": {
+        "AERO_TLS_BACKEND": "wolfssl"
+      }
+    },
+    {
+      "name": "dev-openssl",
+      "displayName": "Dev, OpenSSL",
+      "inherits": [
+        "base",
+        "vcpkg"
+      ],
+      "cacheVariables": {
+        "AERO_TLS_BACKEND": "openssl"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "configuration": "Debug"
+    },
+    {
+      "name": "dev-wolfssl",
+      "configurePreset": "dev-wolfssl",
+      "configuration": "Debug"
+    },
+    {
+      "name": "dev-openssl",
+      "configurePreset": "dev-openssl",
+      "configuration": "Debug"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "dev",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "timeout": 30
+      }
+    },
+    {
+      "name": "dev-wolfssl",
+      "configurePreset": "dev-wolfssl",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "timeout": 30
+      }
+    },
+    {
+      "name": "dev-openssl",
+      "configurePreset": "dev-openssl",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "timeout": 30
+      }
+    }
+  ],
+  "workflowPresets": [
+    {
+      "name": "dev",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "dev"
+        },
+        {
+          "type": "build",
+          "name": "dev"
+        },
+        {
+          "type": "test",
+          "name": "dev"
+        }
+      ]
+    },
+    {
+      "name": "dev-wolfssl",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "dev-wolfssl"
+        },
+        {
+          "type": "build",
+          "name": "dev-wolfssl"
+        },
+        {
+          "type": "test",
+          "name": "dev-wolfssl"
+        }
+      ]
+    },
+    {
+      "name": "dev-openssl",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "dev-openssl"
+        },
+        {
+          "type": "build",
+          "name": "dev-openssl"
+        },
+        {
+          "type": "test",
+          "name": "dev-openssl"
+        }
+      ]
+    }
+  ]
+}
