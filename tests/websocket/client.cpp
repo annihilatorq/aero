@@ -664,8 +664,6 @@ int main() {
     };
 
     "close returns eof and closes the connection when the peer drops TCP instead of replying"_test = [&] {
-      aero::final_action cleanup{[&] { server.close_last_conn(); }};
-
       server.on_accept([&](std::shared_ptr<connection> conn) {
         auto raw_request = conn->read_request();
         conn->write_response(make_websocket_switching_response(raw_request));
