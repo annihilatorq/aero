@@ -39,8 +39,7 @@ jobs:
       - name: Setup Clang
         uses: aminya/setup-cpp@v1
         with:
-          compiler: llvm
-          llvm-version: ${{matrix.clang}}
+          compiler: llvm-${{ matrix.clang }}
 
       - name: Install libc++
         run: |
