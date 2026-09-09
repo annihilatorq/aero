@@ -491,7 +491,6 @@ int main() {
 
           received_close_code = read_masked_close_code(*conn);
           close_received.count_down();
-          conn->close();
         });
 
         websocket::client client{websocket::connection_options{.max_message_size = max_message_size}};
