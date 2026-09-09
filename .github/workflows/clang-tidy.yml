@@ -25,6 +25,7 @@ jobs:
 
       - name: Setup clang and libc++
         run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome*
           sudo apt-get update
           sudo apt-get install -yq --no-install-recommends wget ca-certificates gnupg lsb-release
           wget https://apt.llvm.org/llvm.sh
