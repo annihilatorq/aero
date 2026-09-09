@@ -1,4 +1,4 @@
-name: Linux Sanitizers
+name: Sanitizers (ASan, UBSan, TSan)
 
 on:
   push:
@@ -23,6 +23,7 @@ jobs:
         std: [23]
         sanitizer:
           - { name: ASan+UBSan, flags: "-fsanitize=address,undefined" }
+          - { name: TSan, flags: "-fsanitize=thread" }
         tls:
           - { name: No TLS, backend: none }
 
@@ -31,6 +32,7 @@ jobs:
       CXX: clang++-${{ matrix.clang }}
       ASAN_OPTIONS: "strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1"
       UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+      TSAN_OPTIONS: "halt_on_error=1:second_deadlock_stack=1"
 
     steps:
       - uses: actions/checkout@v6
