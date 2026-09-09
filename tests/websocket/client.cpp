@@ -585,7 +585,9 @@ int main() {
       aero::final_action cleanup{[&] { server.close_last_conn(); }};
 
       std::latch small_packets_sent{1};
+      std::latch text_frame_built{1};
 
+      bool text_frame_was_built{false};
       websocket::detail::client_frame_builder frame_builder;
 
       server.on_accept([&](std::shared_ptr<connection> conn) {
@@ -594,8 +596,10 @@ int main() {
         conn->write_response(make_websocket_switching_response(request));
 
         auto text_frame = frame_builder.build_text_frame("lol");
-        expect(text_frame.has_value());
-        if (not text_frame.has_value()) {
+        text_frame_was_built = text_frame.has_value();
+        text_frame_built.count_down();
+
+        if (not text_frame_was_built) {
           return;
         }
 
@@ -619,11 +623,15 @@ int main() {
       auto [connect_ec, response] = client.connect(url_str);
       expect(not static_cast<bool>(connect_ec));
 
-      client.async_read([&](std::error_code ec, auto) {
-        // Frame that came from server was built with client_frame_builder,
-        // so it will be masked, and client MUST refuse masked frames
-        expect(ec == websocket::protocol_error::masked_frame_from_server);
-      });
+      text_frame_built.wait();
+      expect(text_frame_was_built) << "server failed to build text frame";
+
+      std::error_code read_ec;
+      client.async_read(asio::redirect_error(asio::use_future, read_ec)).wait();
+
+      // Frame that came from server was built with client_frame_builder,
+      // so it will be masked, and client MUST refuse masked frames
+      expect(read_ec == websocket::protocol_error::masked_frame_from_server);
 
       small_packets_sent.wait();
 
@@ -656,8 +664,6 @@ int main() {
     };
 
     "close returns eof and closes the connection when the peer drops TCP instead of replying"_test = [&] {
-      aero::final_action cleanup{[&] { server.close_last_conn(); }};
-
       server.on_accept([&](std::shared_ptr<connection> conn) {
         auto raw_request = conn->read_request();
         conn->write_response(make_websocket_switching_response(raw_request));
