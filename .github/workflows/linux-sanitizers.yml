@@ -1,0 +1,67 @@
+name: Linux Sanitizers
+
+on:
+  push:
+    branches: ["main"]
+    paths-ignore: ["**/*.md", "docs/**"]
+  pull_request:
+    branches: ["main"]
+    paths-ignore: ["**/*.md", "docs/**"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & Test (${{ matrix.sanitizer.name }}, ${{ matrix.tls.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug]
+        clang: [20]
+        std: [23]
+        sanitizer:
+          - { name: ASan+UBSan, flags: "-fsanitize=address,undefined" }
+        tls:
+          - { name: No TLS, backend: none }
+
+    env:
+      CC: clang-${{ matrix.clang }}
+      CXX: clang++-${{ matrix.clang }}
+      ASAN_OPTIONS: "strict_string_checks=1:detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1"
+      UBSAN_OPTIONS: "print_stacktrace=1:halt_on_error=1"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Clang
+        uses: aminya/setup-cpp@v1
+        with:
+          compiler: llvm-${{ matrix.clang }}
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libc++-${{ matrix.clang }}-dev libc++abi-${{ matrix.clang }}-dev libunwind-${{ matrix.clang }}-dev
+
+      - name: Configure CMake
+        shell: bash
+        run: |
+          sanitizer_flags="${{ matrix.sanitizer.flags }} -fno-sanitize-recover=all -fno-omit-frame-pointer"
+
+          cmake -B "${{ github.workspace }}/build-${{ matrix.tls.backend }}" \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_CXX_STANDARD=${{ matrix.std }} \
+            -DCMAKE_C_COMPILER=${{ env.CC }} \
+            -DCMAKE_CXX_COMPILER=${{ env.CXX }} \
+            -DCMAKE_CXX_FLAGS="-stdlib=libc++ ${sanitizer_flags}" \
+            -DCMAKE_EXE_LINKER_FLAGS="-stdlib=libc++ -lc++abi ${sanitizer_flags}" \
+            -DAERO_TLS_BACKEND=${{ matrix.tls.backend }}
+
+      - name: Build
+        run: cmake --build "build-${{ matrix.tls.backend }}" --parallel
+
+      - name: Test
+        working-directory: "build-${{ matrix.tls.backend }}"
+        run: ctest --output-on-failure --parallel --timeout 120
