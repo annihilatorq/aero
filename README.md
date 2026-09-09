@@ -596,6 +596,10 @@ target_link_libraries(my_app PRIVATE aero)
 # set(AERO_USE_BUNDLED_ASIO ON) # "Fetch ASIO using FetchContent if not found on system or in targets"
 ```
 
+### Building with presets
+
+CMakePresets.json provides the necessary general presets for working with TLS and non-TLS builds. Tests and examples, as well as the export of compile_commands.json, are included by default. Place custom settings, such as vcpkg triplets and other settings, in CMakeUserPresets.json.
+
 ### wolfSSL via vcpkg
 
 Install the port with the `asio` feature. When building on Windows, you also need to pass the overlay triplets provided by this repository, since they enable the wolfSSL error queue, without which certificate loading fails.
