@@ -34,6 +34,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Remove Google Chrome apt source
+        run: sudo rm -f /etc/apt/sources.list.d/google-chrome*
+
       - name: Setup Clang
         uses: aminya/setup-cpp@v1
         with:
