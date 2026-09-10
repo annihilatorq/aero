@@ -414,8 +414,11 @@ namespace aero::websocket {
                 co_return co_await self->async_finalize_session(asio::error::timed_out, return_as_deferred_tuple());
               }
 
-              auto [read_ec, message] =
+              // GCC 15: Destructor of tuple-protocol structured binding from co_await skipped at -O1+
+              // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=124584
+              auto read_result =
                 co_await self->async_read(asio::cancel_after(close_deadline.remaining(), return_as_deferred_tuple()));
+              auto& [read_ec, message] = read_result;
 
               if (read_ec) {
                 // Read was canceled due to timeout expiring
@@ -620,7 +623,10 @@ namespace aero::websocket {
 
       std::string_view response_str{reinterpret_cast<const char*>(response_buffer.data()), bytes_read};
 
-      auto [parse_ec, response] = http::detail::parse_response_partial(response_str);
+      // GCC 15: Destructor of tuple-protocol structured binding from co_await skipped at -O1+
+      // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=124584
+      auto parsed_response = http::detail::parse_response_partial(response_str);
+      auto& [parse_ec, response] = parsed_response;
       if (parse_ec) {
         std::ignore = finalize_session();
         return {parse_ec, std::move(response)};
