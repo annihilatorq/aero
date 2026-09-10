@@ -125,10 +125,10 @@ int main() {
   std::string port_str = std::to_string(acceptor.local_endpoint().port());
   std::string url_str = "wss://127.0.0.1:" + port_str + "/socket";
 
+  auto server_ctx = aero::tests::make_tls_server_context();
   std::exception_ptr server_failure;
   std::thread server_thread{[&] {
     try {
-      auto server_ctx = aero::tests::make_tls_server_context();
       for (int connection = 0; connection < 2; ++connection) {
         asio::ssl::stream<tcp::socket> stream{io_context, server_ctx};
         acceptor.accept(stream.next_layer());
