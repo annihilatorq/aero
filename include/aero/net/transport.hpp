@@ -116,7 +116,10 @@ namespace aero::net {
               deferred_tcp_resolver resolver{self->strand_};
               auto service = std::to_string(port);
 
-              auto [resolve_ec, resolved_endpoints] = co_await resolver.async_resolve(host, service);
+              // GCC 15: Destructor of tuple-protocol structured binding from co_await skipped at -O1+
+              // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=124584
+              auto resolve_result = co_await resolver.async_resolve(host, service);
+              auto& [resolve_ec, resolved_endpoints] = resolve_result;
               if (resolve_ec) {
                 if (resolve_ec == asio::error::bad_descriptor) {
                   co_return connect_error::host_invalid;
