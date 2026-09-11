@@ -681,6 +681,36 @@ int main() {
       expect(client.is_closed()) << "lost transport must leave the connection closed";
     };
 
+    "close cancelled while waiting for the peer's close reply still finalizes the session"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      std::latch close_frame_reached_peer{1};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+
+        std::ignore = read_masked_close_code(*conn);
+        close_frame_reached_peer.count_down();
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      asio::cancellation_signal cancel_signal;
+      auto close_future = client.async_close(websocket::close_code::normal,
+        asio::bind_cancellation_slot(cancel_signal.slot(), asio::as_tuple(asio::use_future)));
+
+      close_frame_reached_peer.wait();
+      asio::post(client.get_executor(), [&] { cancel_signal.emit(asio::cancellation_type::terminal); });
+      auto [close_ec] = close_future.get();
+
+      expect(close_ec == asio::error::operation_aborted)
+        << "cancelled close should complete with operation_aborted, got: " << close_ec.message();
+      expect(client.is_closed()) << "cancelled close must finalize the session, not leave it in the closing state";
+      expect(not client.is_open_for_writing()) << "cancelled close must shut the transport down";
+    };
     "close with reason sends the code and reason in the close frame"_test = [&] {
       aero::final_action cleanup{[&] { server.close_last_conn(); }};
 

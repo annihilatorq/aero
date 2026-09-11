@@ -350,7 +350,7 @@ namespace aero::websocket {
 
       return asio::async_initiate<decltype(bound_token), void(std::error_code)>(
         asio::co_composed<void(std::error_code)>(
-          [](auto, basic_connection* self, websocket::close_code close_code, std::string_view close_reason) -> void {
+          [](auto state, basic_connection* self, websocket::close_code close_code, std::string_view close_reason) -> void {
             if (is_close_code_server_only(close_code)) {
               co_return protocol_error::close_code_server_only;
             }
@@ -368,7 +368,13 @@ namespace aero::websocket {
 
             auto [send_close_ec] = co_await self->async_send_close(close_code, close_reason, return_as_deferred_tuple());
             if (send_close_ec) {
+              disable_cancellation(state);
               co_return co_await self->async_finalize_session(send_close_ec, return_as_deferred_tuple());
+            }
+
+            if (is_operation_canceled(state)) {
+              disable_cancellation(state);
+              co_return co_await self->async_finalize_session(asio::error::operation_aborted, return_as_deferred_tuple());
             }
 
             aero::deadline close_deadline{default_close_timeout};
@@ -392,6 +398,7 @@ namespace aero::websocket {
               auto [wait_ec] = co_await self->close_timer_.async_wait(asio::as_tuple(asio::deferred));
               if (!wait_ec) {
                 // Peer close response was not received, timed out
+                disable_cancellation(state);
                 co_return co_await self->async_finalize_session(asio::error::timed_out, return_as_deferred_tuple());
               }
 
@@ -404,6 +411,7 @@ namespace aero::websocket {
               }
 
               // Unexpected error from timer
+              disable_cancellation(state);
               co_return co_await self->async_finalize_session(wait_ec, return_as_deferred_tuple());
             }
 
@@ -411,7 +419,13 @@ namespace aero::websocket {
             // until close frame is received or timeout expires
             for (;;) {
               if (close_deadline.expired()) {
+                disable_cancellation(state);
                 co_return co_await self->async_finalize_session(asio::error::timed_out, return_as_deferred_tuple());
+              }
+
+              if (is_operation_canceled(state)) {
+                disable_cancellation(state);
+                co_return co_await self->async_finalize_session(asio::error::operation_aborted, return_as_deferred_tuple());
               }
 
               // GCC 15: Destructor of tuple-protocol structured binding from co_await skipped at -O1+
@@ -423,15 +437,18 @@ namespace aero::websocket {
               if (read_ec) {
                 // Read was canceled due to timeout expiring
                 if (is_canceled(read_ec) && close_deadline.expired()) {
+                  disable_cancellation(state);
                   co_return co_await self->async_finalize_session(asio::error::timed_out, return_as_deferred_tuple());
                 }
 
                 // Consider any other error as transport fail
+                disable_cancellation(state);
                 co_return co_await self->async_finalize_session(read_ec, return_as_deferred_tuple());
               }
 
               // Received peer's close response - handshake complete
               if (message.is_close()) {
+                disable_cancellation(state);
                 co_return co_await self->async_finalize_session(std::error_code{}, return_as_deferred_tuple());
               }
             }
@@ -881,6 +898,14 @@ namespace aero::websocket {
       return ec == asio::error::operation_aborted;
     }
 
+    static bool is_operation_canceled(auto& state) {
+      return state.cancelled() != asio::cancellation_type::none;
+    }
+
+    static void disable_cancellation(auto& state) {
+      state.reset_cancellation_state(asio::disable_cancellation());
+    }
+
     static bool is_fatal_websocket_error(std::error_code ec) {
       return websocket::is_invalid_payload(ec) || websocket::is_protocol_violation(ec);
     }
@@ -963,7 +988,7 @@ namespace aero::websocket {
 
             // Allow co_await-ing async_finalize_session even if the current
             // co_composed received cancellation
-            state.reset_cancellation_state(asio::disable_cancellation());
+            disable_cancellation(state);
 
             // RFC 6455, Section 7.2.1:
             // If at any point the underlying transport layer connection is
@@ -1129,7 +1154,7 @@ namespace aero::websocket {
             // when we call 'transport_.async_shutdown', the shutdown operation
             // could be cancelled immediately and return 'operation_aborted',
             // potentially leaving the underlying websocket transport still open
-            state.reset_cancellation_state(asio::disable_cancellation());
+            disable_cancellation(state);
 
             if (self->is_current_state(state::closed)) {
               self->signal_close_completion(final_ec);
