@@ -20,6 +20,7 @@
 #include <asio/buffer.hpp>
 #include <asio/cancellation_signal.hpp>
 #include <asio/error.hpp>
+#include <asio/io_context.hpp>
 #include <asio/post.hpp>
 #include <asio/use_future.hpp>
 
