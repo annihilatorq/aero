@@ -17,10 +17,13 @@
 
 #include <asio/as_tuple.hpp>
 #include <asio/bind_cancellation_slot.hpp>
+#include <asio/bind_executor.hpp>
 #include <asio/buffer.hpp>
 #include <asio/cancellation_signal.hpp>
 #include <asio/error.hpp>
+#include <asio/io_context.hpp>
 #include <asio/post.hpp>
+#include <asio/thread_pool.hpp>
 #include <asio/use_future.hpp>
 
 #include <ut/ut.hpp>
@@ -550,6 +553,61 @@ int main() {
       expect(client.is_open_for_writing()) << "refused connect must leave the open connection usable";
     };
 
+    "connect cancelled while waiting for the handshake response still finalizes the session"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      std::latch request_reached_peer{1};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        std::ignore = conn->read_request();
+        request_reached_peer.count_down();
+      });
+
+      websocket::client client;
+      asio::cancellation_signal cancel_signal;
+      auto connect_future =
+        client.async_connect(url_str, asio::bind_cancellation_slot(cancel_signal.slot(), asio::as_tuple(asio::use_future)));
+
+      request_reached_peer.wait();
+      asio::post(client.get_executor(), [&] { cancel_signal.emit(asio::cancellation_type::terminal); });
+      auto [connect_ec, response] = connect_future.get();
+
+      expect(connect_ec == asio::error::operation_aborted)
+        << "cancelled connect should complete with operation_aborted, got: " << connect_ec.message();
+      expect(client.is_closed()) << "cancelled connect must finalize the session, not leave it in the connecting state";
+    };
+
+    "connect cancelled after TCP connected but before the handshake is sent still finalizes the session"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      std::latch peer_accepted{1};
+
+      server.on_accept([&](std::shared_ptr<connection>) { peer_accepted.count_down(); });
+
+      asio::thread_pool pool{2};
+      websocket::client client{pool.get_executor()};
+      asio::cancellation_signal cancel_signal;
+
+      // The connect completion has to reach the coroutine only after
+      // cancellation is signalled. Holding the strand keeps that completion
+      // queued while the other pool thread finishes the TCP connect
+      asio::post(client.get_executor(), [&] {
+        peer_accepted.wait();
+        std::this_thread::sleep_for(200ms);
+        cancel_signal.emit(asio::cancellation_type::terminal);
+      });
+
+      // TODO: Remove executor binding after https://github.com/annihilatorq/aero/issues/91 is fixed
+      auto connect_future = client.async_connect(url_str,
+        asio::bind_cancellation_slot(cancel_signal.slot(),
+          asio::bind_executor(client.get_executor(), asio::as_tuple(asio::use_future))));
+      auto [connect_ec, response] = connect_future.get();
+
+      expect(connect_ec == asio::error::operation_aborted)
+        << "cancelled connect should complete with operation_aborted, got: " << connect_ec.message();
+      expect(client.is_closed()) << "connect that observed cancellation after TCP connected must finalize the session";
+    };
+
     "cancelled in-flight send fails the connection"_test = [&] {
       aero::final_action cleanup{[&] { server.close_last_conn(); }};
 
@@ -579,6 +637,46 @@ int main() {
         << "cancelled send should complete with operation_aborted, got: " << send_ec.message();
       expect(not client.is_open_for_writing()) << "connection with a partially written frame must not accept further writes";
       expect(client.is_closed()) << "cancelled in-flight send must fail the connection, not leave it open";
+    };
+
+    "read cancelled after the peer already dropped TCP still finalizes the session"_test = [&] {
+      std::latch peer_may_close{1};
+      std::latch peer_closed{1};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+
+        peer_may_close.wait();
+        conn->close();
+        peer_closed.count_down();
+      });
+
+      asio::thread_pool pool{2};
+      websocket::client client{pool.get_executor()};
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      // TODO: Remove executor binding after https://github.com/annihilatorq/aero/issues/91 is fixed
+      asio::cancellation_signal cancel_signal;
+      auto read_future = client.async_read(asio::bind_cancellation_slot(cancel_signal.slot(),
+        asio::bind_executor(client.get_executor(), asio::as_tuple(asio::use_future))));
+
+      // The read completes on the strand, so holding the strand keeps that
+      // completion queued while the other pool thread turns the peer's close
+      // into EOF. Cancelling here therefore no longer aborts the read
+      asio::post(client.get_executor(), [&] {
+        peer_may_close.count_down();
+        peer_closed.wait();
+        std::this_thread::sleep_for(200ms);
+        cancel_signal.emit(asio::cancellation_type::terminal);
+      });
+
+      auto [read_ec, message] = read_future.get();
+
+      expect(read_ec == asio::error::eof) << "read that observed cancellation after EOF should report EOF, got: "
+                                          << read_ec.message();
+      expect(client.is_closed()) << "read that observed cancellation after EOF must finalize the session";
     };
 
     "transport drain in async_fail_connection shares a single deadline across multiple reads"_test = [&] {
@@ -679,6 +777,72 @@ int main() {
       auto close_ec = client.close(websocket::close_code::normal);
       expect(close_ec == asio::error::eof) << "got: " << close_ec.message();
       expect(client.is_closed()) << "lost transport must leave the connection closed";
+    };
+
+    "close cancelled while waiting for the peer's close reply still finalizes the session"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      std::latch close_frame_reached_peer{1};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+
+        std::ignore = read_masked_close_code(*conn);
+        close_frame_reached_peer.count_down();
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      asio::cancellation_signal cancel_signal;
+      auto close_future = client.async_close(websocket::close_code::normal,
+        asio::bind_cancellation_slot(cancel_signal.slot(), asio::as_tuple(asio::use_future)));
+
+      close_frame_reached_peer.wait();
+      asio::post(client.get_executor(), [&] { cancel_signal.emit(asio::cancellation_type::terminal); });
+      auto [close_ec] = close_future.get();
+
+      expect(close_ec == asio::error::operation_aborted)
+        << "cancelled close should complete with operation_aborted, got: " << close_ec.message();
+      expect(client.is_closed()) << "cancelled close must finalize the session, not leave it in the closing state";
+      expect(not client.is_open_for_writing()) << "cancelled close must shut the transport down";
+    };
+
+    "close cancelled while a concurrent read waits for the peer's close reply still finalizes the session"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      std::latch close_frame_reached_peer{1};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+
+        std::ignore = read_masked_close_code(*conn);
+        close_frame_reached_peer.count_down();
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      auto read_future = client.async_read(asio::as_tuple(asio::use_future));
+
+      asio::cancellation_signal cancel_signal;
+      auto close_future = client.async_close(websocket::close_code::normal,
+        asio::bind_cancellation_slot(cancel_signal.slot(), asio::as_tuple(asio::use_future)));
+
+      close_frame_reached_peer.wait();
+      asio::post(client.get_executor(), [&] { cancel_signal.emit(asio::cancellation_type::terminal); });
+      auto [close_ec] = close_future.get();
+
+      expect(close_ec == asio::error::operation_aborted)
+        << "cancelled close must not report success without the peer's close reply, got: " << close_ec.message();
+      expect(client.is_closed()) << "cancelled close must finalize the session even while another read is waiting";
+
+      auto [read_ec, message] = read_future.get();
+      expect(static_cast<bool>(read_ec)) << "concurrent read must be woken by the finalized session";
     };
 
     "close with reason sends the code and reason in the close frame"_test = [&] {
