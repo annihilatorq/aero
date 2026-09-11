@@ -106,6 +106,8 @@ namespace aero::websocket {
         asio::co_composed<void(std::error_code, http::response)>(
           [](auto state, basic_connection* self, std::expected<urls::url, std::error_code> parsed_url, http::headers headers)
             -> void {
+            co_await asio::dispatch(self->as_deferred_tuple());
+
             if (!self->is_current_state(state::closed)) {
               co_return {protocol_error::connection_not_closed, http::response{}};
             }
@@ -257,6 +259,8 @@ namespace aero::websocket {
       return asio::async_initiate<decltype(bound_token), void(std::error_code)>(
         asio::co_composed<void(std::error_code)>(
           [](auto, basic_connection* self, std::string_view text) -> void {
+            co_await asio::dispatch(self->as_deferred_tuple());
+
             if (!self->is_current_state(state::open) || self->is_close_received()) {
               co_return protocol_error::connection_closed;
             }
@@ -282,6 +286,8 @@ namespace aero::websocket {
       return asio::async_initiate<decltype(bound_token), void(std::error_code)>(
         asio::co_composed<void(std::error_code)>(
           [](auto, basic_connection* self, std::span<const std::byte> data) -> void {
+            co_await asio::dispatch(self->as_deferred_tuple());
+
             if (!self->is_current_state(state::open) || self->is_close_received()) {
               co_return protocol_error::connection_closed;
             }
@@ -317,6 +323,8 @@ namespace aero::websocket {
       return asio::async_initiate<decltype(bound_token), void(std::error_code)>(
         asio::co_composed<void(std::error_code)>(
           [](auto, basic_connection* self, std::span<const std::byte> data) -> void {
+            co_await asio::dispatch(self->as_deferred_tuple());
+
             if (!self->is_current_state(state::open) || self->is_close_received()) {
               co_return protocol_error::connection_closed;
             }
@@ -341,6 +349,8 @@ namespace aero::websocket {
       return asio::async_initiate<decltype(bound_token), void(std::error_code)>(
         asio::co_composed<void(std::error_code)>(
           [](auto, basic_connection* self, std::span<const std::byte> data) -> void {
+            co_await asio::dispatch(self->as_deferred_tuple());
+
             if (!self->is_current_state(state::open, state::closing) || self->is_close_received()) {
               co_return protocol_error::connection_closed;
             }
@@ -376,6 +386,8 @@ namespace aero::websocket {
       return asio::async_initiate<decltype(bound_token), void(std::error_code)>(
         asio::co_composed<void(std::error_code)>(
           [](auto state, basic_connection* self, websocket::close_code close_code, std::string_view close_reason) -> void {
+            co_await asio::dispatch(self->as_deferred_tuple());
+
             if (is_close_code_server_only(close_code)) {
               co_return protocol_error::close_code_server_only;
             }
@@ -506,6 +518,8 @@ namespace aero::websocket {
       return asio::async_initiate<decltype(bound_token), void(std::error_code, websocket::message)>(
         asio::co_composed<void(std::error_code, websocket::message)>(
           [](auto state, basic_connection* self) -> void {
+            co_await asio::dispatch(self->as_deferred_tuple());
+
             if (self->read_buffer_.capacity() == 0) {
               self->read_buffer_.resize(self->max_read_buffer_size_);
             }
@@ -1190,6 +1204,8 @@ namespace aero::websocket {
             // could be cancelled immediately and return 'operation_aborted',
             // potentially leaving the underlying websocket transport still open
             disable_cancellation(state);
+
+            co_await asio::dispatch(self->as_deferred_tuple());
 
             if (self->is_current_state(state::closed)) {
               self->signal_close_completion(final_ec);
