@@ -11,10 +11,12 @@
 #include <asio/async_result.hpp>
 #include <asio/bind_allocator.hpp>
 #include <asio/bind_cancellation_slot.hpp>
+#include <asio/bind_executor.hpp>
 #include <asio/cancellation_signal.hpp>
 #include <asio/co_composed.hpp>
 #include <asio/connect.hpp>
 #include <asio/deferred.hpp>
+#include <asio/dispatch.hpp>
 #include <asio/error.hpp>
 #include <asio/ip/address.hpp>
 #include <asio/ip/basic_endpoint.hpp>
@@ -59,11 +61,14 @@ namespace aero::net {
       return asio::async_initiate<decltype(bound_token), void(std::error_code)>(
         asio::co_composed<void(std::error_code)>(
           [](auto, transport* self) -> void {
+            co_await asio::dispatch(self->as_deferred_tuple());
+
             using tls::detail::x509_verify_error;
             tls::detail::alert_capture tls_alerts;
             tls_alerts.install(self->tls_stream_->native_handle());
 
-            auto [handshake_ec] = co_await self->tls_stream_->async_handshake(asio::ssl::stream_base::client);
+            auto [handshake_ec] =
+              co_await self->tls_stream_->async_handshake(asio::ssl::stream_base::client, self->as_deferred_tuple());
 
             co_return self->transform_handshake_error(handshake_ec, tls_alerts);
           },
@@ -101,6 +106,8 @@ namespace aero::net {
       return asio::async_initiate<decltype(bound_token), void(std::error_code)>(
         asio::co_composed<void(std::error_code)>(
           [](auto, transport* self, std::string host, asio::ip::port_type port) -> void {
+            co_await asio::dispatch(self->as_deferred_tuple());
+
             using net::connect_error;
 
             std::error_code address_parse_ec;
@@ -111,14 +118,14 @@ namespace aero::net {
 
             if (using_address) {
               asio::ip::tcp::endpoint endpoint(address, port);
-              std::tie(connect_ec) = co_await self->socket_.async_connect(endpoint);
+              std::tie(connect_ec) = co_await self->socket_.async_connect(endpoint, self->as_deferred_tuple());
             } else {
               deferred_tcp_resolver resolver{self->strand_};
               auto service = std::to_string(port);
 
               // GCC 15: Destructor of tuple-protocol structured binding from co_await skipped at -O1+
               // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=124584
-              auto resolve_result = co_await resolver.async_resolve(host, service);
+              auto resolve_result = co_await resolver.async_resolve(host, service, self->as_deferred_tuple());
               auto& [resolve_ec, resolved_endpoints] = resolve_result;
               if (resolve_ec) {
                 if (resolve_ec == asio::error::bad_descriptor) {
@@ -132,7 +139,7 @@ namespace aero::net {
               }
 
               std::tie(connect_ec, std::ignore) =
-                co_await asio::async_connect(self->socket_.lowest_layer(), resolved_endpoints);
+                co_await asio::async_connect(self->socket_.lowest_layer(), resolved_endpoints, self->as_deferred_tuple());
             }
 
             if (connect_ec) {
@@ -151,7 +158,7 @@ namespace aero::net {
                 }
               }
 
-              co_return co_await self->async_handshake(asio::as_tuple(asio::deferred));
+              co_return co_await self->async_handshake(self->as_deferred_tuple());
             }
 #endif
 
@@ -217,12 +224,14 @@ namespace aero::net {
       return asio::async_initiate<decltype(bound_token), void(std::error_code)>(
         asio::co_composed<void(std::error_code)>(
           [](auto, transport* self) -> void {
+            co_await asio::dispatch(self->as_deferred_tuple());
+
             std::error_code shutdown_ec;
             std::error_code close_ec;
 
 #if AERO_USE_TLS
             if (self->is_using_tls_stream()) {
-              std::tie(shutdown_ec) = co_await self->tls_stream_->async_shutdown();
+              std::tie(shutdown_ec) = co_await self->tls_stream_->async_shutdown(self->as_deferred_tuple());
               if (is_ignorable_close_error(shutdown_ec)) {
                 shutdown_ec.clear();
               }
@@ -345,6 +354,10 @@ namespace aero::net {
     }
 
    private:
+    [[nodiscard]] asio::executor_binder<asio::as_tuple_t<asio::deferred_t>, asio::strand<executor_type>> as_deferred_tuple() {
+      return asio::bind_executor(strand_, asio::as_tuple(asio::deferred));
+    }
+
     static bool is_ignorable_close_error(std::error_code ec) {
       return ec == asio::error::not_connected || ec == asio::error::eof || ec == asio::error::bad_descriptor
 #if AERO_USE_TLS
