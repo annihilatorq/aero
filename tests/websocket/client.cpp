@@ -636,6 +636,43 @@ int main() {
       expect(client.is_closed()) << "cancelled in-flight send must fail the connection, not leave it open";
     };
 
+    "read cancelled after the peer already dropped TCP still finalizes the session"_test = [&] {
+      std::latch peer_may_close{1};
+      std::latch peer_closed{1};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+
+        peer_may_close.wait();
+        conn->close();
+        peer_closed.count_down();
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      asio::cancellation_signal cancel_signal;
+      auto read_future =
+        client.async_read(asio::bind_cancellation_slot(cancel_signal.slot(), asio::as_tuple(asio::use_future)));
+
+      // The io thread is held until the peer's close has turned the pending
+      // read into EOF, so cancelling here no longer aborts the read
+      asio::post(client.get_executor(), [&] {
+        peer_may_close.count_down();
+        peer_closed.wait();
+        std::this_thread::sleep_for(200ms);
+        cancel_signal.emit(asio::cancellation_type::terminal);
+      });
+
+      auto [read_ec, message] = read_future.get();
+
+      expect(read_ec == asio::error::eof) << "read that observed cancellation after eof should report eof, got: "
+                                          << read_ec.message();
+      expect(client.is_closed()) << "read that observed cancellation after eof must finalize the session";
+    };
+
     "transport drain in async_fail_connection shares a single deadline across multiple reads"_test = [&] {
       aero::final_action cleanup{[&] { server.close_last_conn(); }};
 

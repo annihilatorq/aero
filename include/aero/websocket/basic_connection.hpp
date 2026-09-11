@@ -504,7 +504,7 @@ namespace aero::websocket {
 
       return asio::async_initiate<decltype(bound_token), void(std::error_code, websocket::message)>(
         asio::co_composed<void(std::error_code, websocket::message)>(
-          [](auto, basic_connection* self) -> void {
+          [](auto state, basic_connection* self) -> void {
             if (self->read_buffer_.capacity() == 0) {
               self->read_buffer_.resize(self->max_read_buffer_size_);
             }
@@ -537,6 +537,7 @@ namespace aero::websocket {
                   // Received a close frame - send close reply (if not sent) and finalize session
                   // Also wakes up any pending async_close waiting on a timer
                   if (message->is_close()) {
+                    disable_cancellation(state);
                     auto [final_ec] = co_await self->async_finalize_session(std::error_code{}, return_as_deferred_tuple());
                     if (final_ec) {
                       co_return {final_ec, websocket::message{}};
@@ -574,6 +575,8 @@ namespace aero::websocket {
                   co_return {read_ec, websocket::message{}};
                 }
 
+                disable_cancellation(state);
+
                 // Unexpected transport error - fail the WebSocket connection (RFC 6455 7.2.1)
                 auto [final_ec] = co_await self->async_finalize_session(read_ec, return_as_deferred_tuple());
 
@@ -588,6 +591,10 @@ namespace aero::websocket {
               if (consume_ec && !self->deferred_read_ec_) {
                 // Store the first error to report after delivering any remaining message
                 self->deferred_read_ec_ = consume_ec;
+              }
+
+              if (is_operation_canceled(state)) {
+                co_return {asio::error::operation_aborted, websocket::message{}};
               }
 
               // Loop continues to check for assembled messages or handle errors
