@@ -17,11 +17,13 @@
 
 #include <asio/as_tuple.hpp>
 #include <asio/bind_cancellation_slot.hpp>
+#include <asio/bind_executor.hpp>
 #include <asio/buffer.hpp>
 #include <asio/cancellation_signal.hpp>
 #include <asio/error.hpp>
 #include <asio/io_context.hpp>
 #include <asio/post.hpp>
+#include <asio/thread_pool.hpp>
 #include <asio/use_future.hpp>
 
 #include <ut/ut.hpp>
@@ -575,35 +577,35 @@ int main() {
       expect(client.is_closed()) << "cancelled connect must finalize the session, not leave it in the connecting state";
     };
 
-    "connect cancelled between a completed handshake write and the response read still finalizes the session"_test = [&] {
+    "connect cancelled after TCP connected but before the handshake is sent still finalizes the session"_test = [&] {
       aero::final_action cleanup{[&] { server.close_last_conn(); }};
 
       std::latch peer_accepted{1};
 
-      server.on_accept([&](std::shared_ptr<connection> conn) {
-        peer_accepted.count_down();
-        std::ignore = conn->read_request();
-      });
+      server.on_accept([&](std::shared_ptr<connection>) { peer_accepted.count_down(); });
 
-      websocket::client client;
+      asio::thread_pool pool{2};
+      websocket::client client{pool.get_executor()};
       asio::cancellation_signal cancel_signal;
 
-      // Posted while the io thread is still held, the cancellation runs
-      // before the handshake write is enqueued, so the write completes
-      // normally with cancellation already signalled
+      // The connect completion has to reach the coroutine only after
+      // cancellation is signalled. Holding the strand keeps that completion
+      // queued while the other pool thread finishes the TCP connect
       asio::post(client.get_executor(), [&] {
         peer_accepted.wait();
         std::this_thread::sleep_for(200ms);
-        asio::post(client.get_executor(), [&] { cancel_signal.emit(asio::cancellation_type::terminal); });
+        cancel_signal.emit(asio::cancellation_type::terminal);
       });
 
-      auto connect_future =
-        client.async_connect(url_str, asio::bind_cancellation_slot(cancel_signal.slot(), asio::as_tuple(asio::use_future)));
+      // TODO: Remove executor binding after https://github.com/annihilatorq/aero/issues/91 is fixed
+      auto connect_future = client.async_connect(url_str,
+        asio::bind_cancellation_slot(cancel_signal.slot(),
+          asio::bind_executor(client.get_executor(), asio::as_tuple(asio::use_future))));
       auto [connect_ec, response] = connect_future.get();
 
       expect(connect_ec == asio::error::operation_aborted)
         << "cancelled connect should complete with operation_aborted, got: " << connect_ec.message();
-      expect(client.is_closed()) << "connect that observed cancellation after a successful write must finalize the session";
+      expect(client.is_closed()) << "connect that observed cancellation after TCP connected must finalize the session";
     };
 
     "cancelled in-flight send fails the connection"_test = [&] {
@@ -650,16 +652,19 @@ int main() {
         peer_closed.count_down();
       });
 
-      websocket::client client;
+      asio::thread_pool pool{2};
+      websocket::client client{pool.get_executor()};
       auto [connect_ec, response] = client.connect(url_str);
       expect(not static_cast<bool>(connect_ec));
 
+      // TODO: Remove executor binding after https://github.com/annihilatorq/aero/issues/91 is fixed
       asio::cancellation_signal cancel_signal;
-      auto read_future =
-        client.async_read(asio::bind_cancellation_slot(cancel_signal.slot(), asio::as_tuple(asio::use_future)));
+      auto read_future = client.async_read(asio::bind_cancellation_slot(cancel_signal.slot(),
+        asio::bind_executor(client.get_executor(), asio::as_tuple(asio::use_future))));
 
-      // The io thread is held until the peer's close has turned the pending
-      // read into EOF, so cancelling here no longer aborts the read
+      // The read completes on the strand, so holding the strand keeps that
+      // completion queued while the other pool thread turns the peer's close
+      // into EOF. Cancelling here therefore no longer aborts the read
       asio::post(client.get_executor(), [&] {
         peer_may_close.count_down();
         peer_closed.wait();
@@ -669,9 +674,9 @@ int main() {
 
       auto [read_ec, message] = read_future.get();
 
-      expect(read_ec == asio::error::eof) << "read that observed cancellation after eof should report eof, got: "
+      expect(read_ec == asio::error::eof) << "read that observed cancellation after EOF should report EOF, got: "
                                           << read_ec.message();
-      expect(client.is_closed()) << "read that observed cancellation after eof must finalize the session";
+      expect(client.is_closed()) << "read that observed cancellation after EOF must finalize the session";
     };
 
     "transport drain in async_fail_connection shares a single deadline across multiple reads"_test = [&] {
@@ -806,8 +811,9 @@ int main() {
     };
 
     "close cancelled while a concurrent read waits for the peer's close reply still finalizes the session"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
       std::latch close_frame_reached_peer{1};
-      std::latch release_peer{1};
 
       server.on_accept([&](std::shared_ptr<connection> conn) {
         auto raw_request = conn->read_request();
@@ -815,8 +821,6 @@ int main() {
 
         std::ignore = read_masked_close_code(*conn);
         close_frame_reached_peer.count_down();
-        release_peer.wait();
-        conn->close();
       });
 
       websocket::client client;
@@ -837,7 +841,6 @@ int main() {
         << "cancelled close must not report success without the peer's close reply, got: " << close_ec.message();
       expect(client.is_closed()) << "cancelled close must finalize the session even while another read is waiting";
 
-      release_peer.count_down();
       auto [read_ec, message] = read_future.get();
       expect(static_cast<bool>(read_ec)) << "concurrent read must be woken by the finalized session";
     };
