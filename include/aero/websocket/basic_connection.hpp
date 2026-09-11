@@ -103,7 +103,7 @@ namespace aero::websocket {
 
       return asio::async_initiate<decltype(bound_token), void(std::error_code, http::response)>(
         asio::co_composed<void(std::error_code, http::response)>(
-          [](auto, basic_connection* self, std::expected<urls::url, std::error_code> parsed_url, http::headers headers)
+          [](auto state, basic_connection* self, std::expected<urls::url, std::error_code> parsed_url, http::headers headers)
             -> void {
             if (!self->is_current_state(state::closed)) {
               co_return {protocol_error::connection_not_closed, http::response{}};
@@ -133,13 +133,27 @@ namespace aero::websocket {
             auto [connect_ec] =
               co_await self->transport_->async_connect(std::string{url.host()}, *port, return_as_deferred_tuple());
             if (connect_ec) {
+              // Allow co_await-ing async_finalize_session even if the current
+              // co_composed received cancellation
+              disable_cancellation(state);
               co_await self->async_finalize_session({}, return_as_deferred_tuple());
               co_return {connect_ec, http::response{}};
+            }
+
+            // Once completion handler is canceled, co_composed completes it
+            // with operation_aborted at the next co_await instead of
+            // suspending, so before any co_await we have to manually check
+            // if operation was canceled
+            if (is_operation_canceled(state)) {
+              disable_cancellation(state);
+              co_await self->async_finalize_session({}, return_as_deferred_tuple());
+              co_return {asio::error::operation_aborted, http::response{}};
             }
 
             // Build bodyless HTTP websocket upgrade request
             auto handshake = self->client_handshaker_.build_request(url, std::move(headers));
             if (!handshake) {
+              disable_cancellation(state);
               co_await self->async_finalize_session({}, return_as_deferred_tuple());
               co_return {handshake.error(), http::response{}};
             }
@@ -147,8 +161,15 @@ namespace aero::websocket {
             auto [write_ec, bytes_written] =
               co_await self->transport_->async_write(handshake->bytes(), return_as_deferred_tuple());
             if (write_ec) {
+              disable_cancellation(state);
               co_await self->async_finalize_session({}, return_as_deferred_tuple());
               co_return {write_ec, http::response{}};
+            }
+
+            if (is_operation_canceled(state)) {
+              disable_cancellation(state);
+              co_await self->async_finalize_session({}, return_as_deferred_tuple());
+              co_return {asio::error::operation_aborted, http::response{}};
             }
 
             std::vector<std::byte> response_buffer;
@@ -159,6 +180,7 @@ namespace aero::websocket {
               http::detail::double_crlf,
               return_as_deferred_tuple());
             if (read_ec) {
+              disable_cancellation(state);
               co_await self->async_finalize_session({}, return_as_deferred_tuple());
               co_return {read_ec, http::response{}};
             }
@@ -176,6 +198,7 @@ namespace aero::websocket {
 
             auto [parse_ec, response] = http::detail::parse_response_partial(response_str);
             if (parse_ec) {
+              disable_cancellation(state);
               co_await self->async_finalize_session({}, return_as_deferred_tuple());
               co_return {parse_ec, std::move(response)};
             }
@@ -183,6 +206,7 @@ namespace aero::websocket {
             // Perform upgrade challenge with server handshake response
             auto challenge_ec = self->client_handshaker_.validate_server_handshake(response, handshake->sec_websocket_key);
             if (challenge_ec) {
+              disable_cancellation(state);
               co_await self->async_finalize_session({}, return_as_deferred_tuple());
               co_return {challenge_ec, std::move(response)};
             }

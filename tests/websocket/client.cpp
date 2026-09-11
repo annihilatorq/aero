@@ -550,6 +550,61 @@ int main() {
       expect(client.is_open_for_writing()) << "refused connect must leave the open connection usable";
     };
 
+    "connect cancelled while waiting for the handshake response still finalizes the session"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      std::latch request_reached_peer{1};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        std::ignore = conn->read_request();
+        request_reached_peer.count_down();
+      });
+
+      websocket::client client;
+      asio::cancellation_signal cancel_signal;
+      auto connect_future =
+        client.async_connect(url_str, asio::bind_cancellation_slot(cancel_signal.slot(), asio::as_tuple(asio::use_future)));
+
+      request_reached_peer.wait();
+      asio::post(client.get_executor(), [&] { cancel_signal.emit(asio::cancellation_type::terminal); });
+      auto [connect_ec, response] = connect_future.get();
+
+      expect(connect_ec == asio::error::operation_aborted)
+        << "cancelled connect should complete with operation_aborted, got: " << connect_ec.message();
+      expect(client.is_closed()) << "cancelled connect must finalize the session, not leave it in the connecting state";
+    };
+
+    "connect cancelled between a completed handshake write and the response read still finalizes the session"_test = [&] {
+      aero::final_action cleanup{[&] { server.close_last_conn(); }};
+
+      std::latch peer_accepted{1};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        peer_accepted.count_down();
+        std::ignore = conn->read_request();
+      });
+
+      websocket::client client;
+      asio::cancellation_signal cancel_signal;
+
+      // Posted while the io thread is still held, the cancellation runs
+      // before the handshake write is enqueued, so the write completes
+      // normally with cancellation already signalled
+      asio::post(client.get_executor(), [&] {
+        peer_accepted.wait();
+        std::this_thread::sleep_for(200ms);
+        asio::post(client.get_executor(), [&] { cancel_signal.emit(asio::cancellation_type::terminal); });
+      });
+
+      auto connect_future =
+        client.async_connect(url_str, asio::bind_cancellation_slot(cancel_signal.slot(), asio::as_tuple(asio::use_future)));
+      auto [connect_ec, response] = connect_future.get();
+
+      expect(connect_ec == asio::error::operation_aborted)
+        << "cancelled connect should complete with operation_aborted, got: " << connect_ec.message();
+      expect(client.is_closed()) << "connect that observed cancellation after a successful write must finalize the session";
+    };
+
     "cancelled in-flight send fails the connection"_test = [&] {
       aero::final_action cleanup{[&] { server.close_last_conn(); }};
 
