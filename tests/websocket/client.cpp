@@ -587,6 +587,8 @@ int main() {
       asio::thread_pool pool{2};
       websocket::client client{pool.get_executor()};
       asio::cancellation_signal cancel_signal;
+      auto connect_future =
+        client.async_connect(url_str, asio::bind_cancellation_slot(cancel_signal.slot(), asio::as_tuple(asio::use_future)));
 
       // The connect completion has to reach the coroutine only after
       // cancellation is signalled. Holding the strand keeps that completion
@@ -597,10 +599,6 @@ int main() {
         cancel_signal.emit(asio::cancellation_type::terminal);
       });
 
-      // TODO: Remove executor binding after https://github.com/annihilatorq/aero/issues/91 is fixed
-      auto connect_future = client.async_connect(url_str,
-        asio::bind_cancellation_slot(cancel_signal.slot(),
-          asio::bind_executor(client.get_executor(), asio::as_tuple(asio::use_future))));
       auto [connect_ec, response] = connect_future.get();
 
       expect(connect_ec == asio::error::operation_aborted)
@@ -657,10 +655,9 @@ int main() {
       auto [connect_ec, response] = client.connect(url_str);
       expect(not static_cast<bool>(connect_ec));
 
-      // TODO: Remove executor binding after https://github.com/annihilatorq/aero/issues/91 is fixed
       asio::cancellation_signal cancel_signal;
-      auto read_future = client.async_read(asio::bind_cancellation_slot(cancel_signal.slot(),
-        asio::bind_executor(client.get_executor(), asio::as_tuple(asio::use_future))));
+      auto read_future =
+        client.async_read(asio::bind_cancellation_slot(cancel_signal.slot(), asio::as_tuple(asio::use_future)));
 
       // The read completes on the strand, so holding the strand keeps that
       // completion queued while the other pool thread turns the peer's close
