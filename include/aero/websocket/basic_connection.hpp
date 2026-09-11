@@ -402,12 +402,15 @@ namespace aero::websocket {
                 co_return co_await self->async_finalize_session(asio::error::timed_out, return_as_deferred_tuple());
               }
 
-              // Close response was received in read loop and it woke up our 'close_timer_'
               if (is_canceled(wait_ec)) {
+                // Close response was received in read loop and it woke up our 'close_timer_'
                 if (auto result = self->take_close_result()) {
                   co_return *result;
                 }
-                co_return std::error_code{};
+
+                // Сlose result is empty, so the timer was cancelled by the caller
+                disable_cancellation(state);
+                co_return co_await self->async_finalize_session(asio::error::operation_aborted, return_as_deferred_tuple());
               }
 
               // Unexpected error from timer

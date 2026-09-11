@@ -711,6 +711,44 @@ int main() {
       expect(client.is_closed()) << "cancelled close must finalize the session, not leave it in the closing state";
       expect(not client.is_open_for_writing()) << "cancelled close must shut the transport down";
     };
+
+    "close cancelled while a concurrent read waits for the peer's close reply still finalizes the session"_test = [&] {
+      std::latch close_frame_reached_peer{1};
+      std::latch release_peer{1};
+
+      server.on_accept([&](std::shared_ptr<connection> conn) {
+        auto raw_request = conn->read_request();
+        conn->write_response(make_websocket_switching_response(raw_request));
+
+        std::ignore = read_masked_close_code(*conn);
+        close_frame_reached_peer.count_down();
+        release_peer.wait();
+        conn->close();
+      });
+
+      websocket::client client;
+      auto [connect_ec, response] = client.connect(url_str);
+      expect(not static_cast<bool>(connect_ec));
+
+      auto read_future = client.async_read(asio::as_tuple(asio::use_future));
+
+      asio::cancellation_signal cancel_signal;
+      auto close_future = client.async_close(websocket::close_code::normal,
+        asio::bind_cancellation_slot(cancel_signal.slot(), asio::as_tuple(asio::use_future)));
+
+      close_frame_reached_peer.wait();
+      asio::post(client.get_executor(), [&] { cancel_signal.emit(asio::cancellation_type::terminal); });
+      auto [close_ec] = close_future.get();
+
+      expect(close_ec == asio::error::operation_aborted)
+        << "cancelled close must not report success without the peer's close reply, got: " << close_ec.message();
+      expect(client.is_closed()) << "cancelled close must finalize the session even while another read is waiting";
+
+      release_peer.count_down();
+      auto [read_ec, message] = read_future.get();
+      expect(static_cast<bool>(read_ec)) << "concurrent read must be woken by the finalized session";
+    };
+
     "close with reason sends the code and reason in the close frame"_test = [&] {
       aero::final_action cleanup{[&] { server.close_last_conn(); }};
 
