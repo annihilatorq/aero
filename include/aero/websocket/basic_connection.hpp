@@ -1,5 +1,6 @@
 #pragma once
 
+#include <asio/any_io_executor.hpp>
 #include <atomic>
 #include <chrono>
 #include <expected>
@@ -56,7 +57,7 @@
 
 namespace aero::websocket {
 
-  template <websocket::role Role>
+  template <websocket::role Role, asio::execution::executor Executor = asio::any_io_executor>
   class basic_connection {
     using protocol_error = websocket::protocol_error;
     constexpr static std::span<const std::byte> null_bytes{};
@@ -64,9 +65,14 @@ namespace aero::websocket {
     constexpr static std::chrono::seconds transport_drain_deadline{1};
 
    public:
-    using transport_type = aero::net::transport;
+    using executor_type = Executor;
+    using transport_type = aero::net::transport<executor_type>;
     using duration = std::chrono::steady_clock::duration;
-    using executor_type = typename transport_type::executor_type;
+
+    template <asio::execution::executor OtherExecutor>
+    struct rebind_executor {
+      using other = basic_connection<Role, OtherExecutor>;
+    };
 
     explicit basic_connection(connection_options options = {})
       : strand_(asio::make_strand(aero::get_default_executor())),

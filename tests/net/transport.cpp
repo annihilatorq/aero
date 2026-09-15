@@ -51,7 +51,7 @@ namespace {
     asio::io_context context;
     asio::ip::tcp::acceptor acceptor{context, {asio::ip::make_address("127.0.0.1"), 0}};
     asio::ip::tcp::socket peer{context};
-    aero::net::transport transport{asio::make_strand(context.get_executor())};
+    aero::net::transport<> transport{asio::make_strand(context.get_executor())};
 
     loopback_transport() {
       acceptor.async_accept(peer, [](std::error_code) {});

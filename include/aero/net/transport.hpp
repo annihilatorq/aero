@@ -46,6 +46,7 @@
 
 namespace aero::net {
 
+  template <asio::execution::executor Executor = asio::any_io_executor>
   class transport {
     using tcp = asio::ip::tcp;
     using tcp_socket = tcp::socket;
@@ -90,7 +91,12 @@ namespace aero::net {
 #endif
 
    public:
-    using executor_type = asio::any_io_executor;
+    using executor_type = Executor;
+
+    template <typename OtherExecutor>
+    struct rebind_executor {
+      using other = transport<OtherExecutor>;
+    };
 
     explicit transport(asio::strand<executor_type> strand): strand_(std::move(strand)), socket_(strand_) {}
 
@@ -569,7 +575,7 @@ namespace aero::net {
       }
     }
 
-    asio::strand<asio::any_io_executor> strand_;
+    asio::strand<executor_type> strand_;
     deferred_tcp_socket socket_;
 #if AERO_USE_TLS
     std::optional<asio::ssl::stream<deferred_tcp_socket&>> tls_stream_;
