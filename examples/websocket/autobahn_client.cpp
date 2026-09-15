@@ -13,7 +13,6 @@
 #include <asio/io_context.hpp>
 #include <asio/use_awaitable.hpp>
 
-#include "aero/util/io_runtime.hpp"
 #include "aero/websocket/client.hpp"
 #include "aero/websocket/message.hpp"
 
@@ -28,9 +27,9 @@ std::expected<std::uint32_t, std::error_code> parse_u32(std::string_view text) {
   return value;
 }
 
-std::error_code run_autobahn_client(websocket::client::executor_type executor, std::string base_url, std::string agent) {
+std::error_code run_autobahn_client(std::string base_url, std::string agent) {
   {
-    websocket::client client{executor};
+    websocket::client client;
 
     auto [connect_ec, handshake_resp] = client.connect(std::format("{}/getCaseCount", base_url));
     if (connect_ec) {
@@ -56,7 +55,7 @@ std::error_code run_autobahn_client(websocket::client::executor_type executor, s
     std::println("Autobahn case count: {}", case_count);
 
     for (std::uint32_t case_id = 1; case_id <= case_count; ++case_id) {
-      websocket::client case_client{client.get_executor()};
+      websocket::client case_client;
 
       auto [connect_ec, handshake_resp] =
         case_client.connect(std::format("{}/runCase?case={}&agent={}", base_url, case_id, agent));
@@ -100,7 +99,7 @@ std::error_code run_autobahn_client(websocket::client::executor_type executor, s
   }
 
   {
-    websocket::client client{executor};
+    websocket::client client;
     auto [connect_ec, handshake_resp] = client.connect(std::format("{}/updateReports?agent={}", base_url, agent));
     if (connect_ec) {
       return connect_ec;
@@ -135,9 +134,7 @@ int main(int argc, char** argv) {
   ::SetThreadUILanguage(MAKELANGID(LANG_ENGLISH, SUBLANG_ENGLISH_US));
 #endif
 
-  aero::io_runtime runtime{1, aero::wait_threads};
-
-  auto result_ec = run_autobahn_client(runtime.get_executor(), base_url, agent);
+  auto result_ec = run_autobahn_client(base_url, agent);
   if (result_ec) {
     std::println("Autobahn run failed: {}", result_ec.message());
     return 1;
