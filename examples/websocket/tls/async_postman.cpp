@@ -77,9 +77,9 @@ int main() {
   websocket::client client{runtime.get_executor(), tls_context.context()};
 
   try {
-    // All coroutines should use client executor to serialize all
+    // All coroutines should run on the client strand to serialize all
     // of the operations correctly & prevent any race conditions
-    auto echo_ec = asio::co_spawn(client.get_executor(), async_run_echo_client(client), asio::use_future).get();
+    auto echo_ec = asio::co_spawn(client.get_strand(), async_run_echo_client(client), asio::use_future).get();
     if (echo_ec) {
       print_error("Postman echo client failed", echo_ec);
     }

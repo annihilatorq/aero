@@ -937,7 +937,7 @@ namespace aero::websocket {
     }
 
     [[nodiscard]] executor_type get_executor() const noexcept {
-      return strand_;
+      return strand_.get_inner_executor();
     }
 
     [[nodiscard]] asio::strand<executor_type> get_strand() const noexcept {

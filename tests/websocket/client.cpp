@@ -569,7 +569,7 @@ int main() {
         client.async_connect(url_str, asio::bind_cancellation_slot(cancel_signal.slot(), asio::as_tuple(asio::use_future)));
 
       request_reached_peer.wait();
-      asio::post(client.get_executor(), [&] { cancel_signal.emit(asio::cancellation_type::terminal); });
+      asio::post(client.get_strand(), [&] { cancel_signal.emit(asio::cancellation_type::terminal); });
       auto [connect_ec, response] = connect_future.get();
 
       expect(connect_ec == asio::error::operation_aborted)
@@ -593,7 +593,7 @@ int main() {
       // The connect completion has to reach the coroutine only after
       // cancellation is signalled. Holding the strand keeps that completion
       // queued while the other pool thread finishes the TCP connect
-      asio::post(client.get_executor(), [&] {
+      asio::post(client.get_strand(), [&] {
         peer_accepted.wait();
         std::this_thread::sleep_for(200ms);
         cancel_signal.emit(asio::cancellation_type::terminal);
@@ -628,7 +628,7 @@ int main() {
         asio::bind_cancellation_slot(cancel_signal.slot(), asio::as_tuple(asio::use_future)));
 
       frame_reached_peer.wait();
-      asio::post(client.get_executor(), [&] { cancel_signal.emit(asio::cancellation_type::terminal); });
+      asio::post(client.get_strand(), [&] { cancel_signal.emit(asio::cancellation_type::terminal); });
       auto [send_ec] = send_future.get();
 
       expect(send_ec == asio::error::operation_aborted)
@@ -662,7 +662,7 @@ int main() {
       // The read completes on the strand, so holding the strand keeps that
       // completion queued while the other pool thread turns the peer's close
       // into EOF. Cancelling here therefore no longer aborts the read
-      asio::post(client.get_executor(), [&] {
+      asio::post(client.get_strand(), [&] {
         peer_may_close.count_down();
         peer_closed.wait();
         std::this_thread::sleep_for(200ms);
@@ -798,7 +798,7 @@ int main() {
         asio::bind_cancellation_slot(cancel_signal.slot(), asio::as_tuple(asio::use_future)));
 
       close_frame_reached_peer.wait();
-      asio::post(client.get_executor(), [&] { cancel_signal.emit(asio::cancellation_type::terminal); });
+      asio::post(client.get_strand(), [&] { cancel_signal.emit(asio::cancellation_type::terminal); });
       auto [close_ec] = close_future.get();
 
       expect(close_ec == asio::error::operation_aborted)
@@ -831,7 +831,7 @@ int main() {
         asio::bind_cancellation_slot(cancel_signal.slot(), asio::as_tuple(asio::use_future)));
 
       close_frame_reached_peer.wait();
-      asio::post(client.get_executor(), [&] { cancel_signal.emit(asio::cancellation_type::terminal); });
+      asio::post(client.get_strand(), [&] { cancel_signal.emit(asio::cancellation_type::terminal); });
       auto [close_ec] = close_future.get();
 
       expect(close_ec == asio::error::operation_aborted)
