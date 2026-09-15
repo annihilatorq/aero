@@ -2,7 +2,6 @@
 
 #include <deque>
 #include <span>
-#include <type_traits>
 
 #include <asio/any_completion_handler.hpp>
 #include <asio/any_io_executor.hpp>
@@ -15,6 +14,7 @@
 #include <asio/cancellation_signal.hpp>
 #include <asio/co_composed.hpp>
 #include <asio/connect.hpp>
+#include <asio/default_completion_token.hpp>
 #include <asio/deferred.hpp>
 #include <asio/dispatch.hpp>
 #include <asio/error.hpp>
@@ -42,6 +42,7 @@
 #endif
 
 #include "aero/detail/aligned_allocator.hpp"
+#include "aero/detail/asio_completion_tokens.hpp"
 #include "aero/net/error.hpp"
 
 namespace aero::net {
@@ -105,8 +106,9 @@ namespace aero::net {
       : strand_(std::move(strand)), socket_(strand_), tls_stream_(std::in_place, socket_, context) {}
 #endif
 
-    template <typename CompletionToken>
-    auto async_connect(std::string host, asio::ip::port_type port, CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<transport>>
+    auto async_connect(std::string host, asio::ip::port_type port,
+      CompletionToken&& token = aero::detail::default_token<executor_type>()) {
       auto bound_token = asio::bind_allocator(aero::detail::aligned_allocator<>{}, std::forward<CompletionToken>(token));
 
       return asio::async_initiate<decltype(bound_token), void(std::error_code)>(
@@ -224,8 +226,8 @@ namespace aero::net {
       return {};
     }
 
-    template <typename CompletionToken>
-    auto async_shutdown(CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<transport>>
+    auto async_shutdown(CompletionToken&& token = aero::detail::default_token<executor_type>()) {
       auto bound_token = asio::bind_allocator(aero::detail::aligned_allocator<>{}, std::forward<CompletionToken>(token));
       return asio::async_initiate<decltype(bound_token), void(std::error_code)>(
         asio::co_composed<void(std::error_code)>(
@@ -277,8 +279,9 @@ namespace aero::net {
       return shutdown_ec ? shutdown_ec : close_ec;
     }
 
-    template <typename MutableBuffersSequence, typename CompletionToken>
-    auto async_read_some(const MutableBuffersSequence& buffers, CompletionToken&& token) {
+    template <typename MutableBuffersSequence, typename CompletionToken = aero::detail::default_token_type<transport>>
+    auto async_read_some(const MutableBuffersSequence& buffers,
+      CompletionToken&& token = aero::detail::default_token<executor_type>()) {
       auto bound_token = asio::bind_allocator(aero::detail::aligned_allocator<>{}, std::forward<CompletionToken>(token));
       return asio::async_initiate<void(std::error_code, std::size_t)>(initiate_async_read_some{this}, bound_token, buffers);
     }
@@ -303,8 +306,9 @@ namespace aero::net {
       return socket_.read_some(buffers, ec);
     }
 
-    template <typename CompletionToken>
-    auto async_write(std::span<const std::byte> buffer, CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<transport>>
+    auto async_write(std::span<const std::byte> buffer,
+      CompletionToken&& token = aero::detail::default_token<executor_type>()) {
       auto bound_token = asio::bind_allocator(aero::detail::aligned_allocator<>{}, std::forward<CompletionToken>(token));
       return asio::async_initiate<void(std::error_code, std::size_t)>(initiate_async_write{this}, bound_token, buffer);
     }
@@ -411,7 +415,7 @@ namespace aero::net {
     struct initiate_async_read_some {
       transport* self;
 
-      using executor_type = transport::executor_type;
+      using executor_type = aero::detail::default_token_strand<transport::executor_type>;
 
       [[nodiscard]] executor_type get_executor() const noexcept {
         return self->strand_;
@@ -432,7 +436,7 @@ namespace aero::net {
     struct initiate_async_write {
       transport* self;
 
-      using executor_type = transport::executor_type;
+      using executor_type = aero::detail::default_token_strand<transport::executor_type>;
 
       [[nodiscard]] executor_type get_executor() const noexcept {
         return self->strand_;
@@ -575,7 +579,7 @@ namespace aero::net {
       }
     }
 
-    asio::strand<executor_type> strand_;
+    aero::detail::default_token_strand<executor_type> strand_;
     deferred_tcp_socket socket_;
 #if AERO_USE_TLS
     std::optional<asio::ssl::stream<deferred_tcp_socket&>> tls_stream_;

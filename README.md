@@ -174,6 +174,7 @@ int main() {
 #include <system_error>
 
 #include <asio/awaitable.hpp>
+#include <asio/co_spawn.hpp>
 #include <asio/use_awaitable.hpp>
 #include <asio/use_future.hpp>
 
@@ -200,32 +201,31 @@ void print_headers(const aero::http::headers& headers) {
   std::println("[HEADERS] Done");
 }
 
-asio::awaitable<std::error_code> async_run_echo_client(websocket::client& client) {
+asio::awaitable<std::error_code> async_run_echo_client(websocket::coro_client& client) {
   // https://blog.postman.com/introducing-postman-websocket-echo-service/
-  auto [connect_ec, handshake_response] =
-    co_await client.async_connect("wss://ws.postman-echo.com/raw", asio::as_tuple(asio::use_awaitable));
+  auto [connect_ec, response] = co_await client.async_connect("wss://ws.postman-echo.com/raw");
   if (connect_ec) {
     co_return connect_ec;
   }
 
-  print_headers(handshake_response.headers);
+  print_headers(response.headers);
 
-  auto [write_ec] = co_await client.async_send_text("hello from aero client!!!", asio::as_tuple(asio::use_awaitable));
+  auto [write_ec] = co_await client.async_send_text("hello from aero client!!!");
   if (write_ec) {
     co_return write_ec;
   }
 
-  auto [read_ec, message] = co_await client.async_read(asio::cancel_after(1500ms, asio::as_tuple(asio::use_awaitable)));
+  auto [read_ec, message] = co_await client.async_read(asio::cancel_after(1500ms));
   if (read_ec) {
     co_return read_ec;
   }
 
   std::println("Received message from postman echo server. Kind: {}. Text: {}", message.kind, message.text());
 
-  auto [close_ec] = co_await client.async_close(websocket::close_code::normal, asio::as_tuple(asio::use_awaitable));
+  auto [close_ec] = co_await client.async_close(websocket::close_code::normal);
   if (close_ec) {
     if (close_ec == aero::errc::timeout) {
-      co_await client.async_force_close(asio::use_awaitable);
+      co_await client.async_force_close();
       co_return std::error_code{};
     }
     co_return close_ec;
@@ -243,7 +243,7 @@ int main() {
   aero::tls::system_context tls_context{aero::tls::version::tlsv1_2};
   tls_context.disable_deprecated_versions();
 
-  websocket::client client{runtime.get_executor(), tls_context.context()};
+  websocket::coro_client client{runtime.get_executor(), tls_context.context()};
 
   try {
     // All coroutines should run on the client strand to serialize all
