@@ -461,7 +461,7 @@ namespace aero::websocket {
                   co_return *result;
                 }
 
-                // Сlose result is empty, so the timer was cancelled by the caller
+                // Close result is empty, so the timer was cancelled by the caller
                 disable_cancellation(state);
                 co_return co_await self->async_finalize_session(asio::error::operation_aborted, self->as_deferred_tuple());
               }
