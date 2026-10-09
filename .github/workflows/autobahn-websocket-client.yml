@@ -62,7 +62,7 @@ jobs:
             -DAERO_BUILD_TESTS=OFF
 
       - name: Build
-        run: cmake --build "$BUILD_DIR" --parallel
+        run: cmake --build "$BUILD_DIR" --parallel "$(nproc)"
 
       - name: Start Autobahn fuzzingserver
         run: |

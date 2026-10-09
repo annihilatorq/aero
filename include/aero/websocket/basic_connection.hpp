@@ -1,5 +1,7 @@
 #pragma once
 
+#include <asio/any_io_executor.hpp>
+#include <asio/default_completion_token.hpp>
 #include <atomic>
 #include <chrono>
 #include <expected>
@@ -28,6 +30,7 @@
 
 #include "aero/default_executor.hpp"
 #include "aero/detail/aligned_allocator.hpp"
+#include "aero/detail/asio_completion_tokens.hpp"
 #include "aero/error.hpp"
 #include "aero/http/detail/line_endings.hpp"
 #include "aero/http/response.hpp"
@@ -56,7 +59,7 @@
 
 namespace aero::websocket {
 
-  template <websocket::role Role>
+  template <websocket::role Role, asio::execution::executor Executor = asio::any_io_executor>
   class basic_connection {
     using protocol_error = websocket::protocol_error;
     constexpr static std::span<const std::byte> null_bytes{};
@@ -64,9 +67,14 @@ namespace aero::websocket {
     constexpr static std::chrono::seconds transport_drain_deadline{1};
 
    public:
-    using transport_type = aero::net::transport;
+    using executor_type = Executor;
+    using transport_type = aero::net::transport<executor_type>;
     using duration = std::chrono::steady_clock::duration;
-    using executor_type = typename transport_type::executor_type;
+
+    template <asio::execution::executor OtherExecutor>
+    struct rebind_executor {
+      using other = basic_connection<Role, OtherExecutor>;
+    };
 
     explicit basic_connection(connection_options options = {})
       : strand_(asio::make_strand(aero::get_default_executor())),
@@ -76,7 +84,7 @@ namespace aero::websocket {
         max_read_buffer_size_(options.read_buffer_size) {}
 
     explicit basic_connection(executor_type executor, connection_options options = {})
-      : strand_(asio::make_strand(executor)),
+      : strand_({asio::make_strand(executor)}),
         client_frame_builder_({.validate_utf8 = options.validate_outgoing_utf8}),
         message_reader_({.max_message_size = options.max_message_size}),
         client_handshaker_(options.client_handshaker),
@@ -98,8 +106,9 @@ namespace aero::websocket {
     }
 #endif
 
-    template <typename CompletionToken>
-    auto async_connect(std::expected<urls::url, std::error_code> parsed_url, http::headers headers, CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<basic_connection>>
+    auto async_connect(std::expected<urls::url, std::error_code> parsed_url, http::headers headers,
+      CompletionToken&& token = aero::detail::default_token<basic_connection>()) {
       auto bound_token = asio::bind_allocator(aero::detail::aligned_allocator<>{}, std::forward<CompletionToken>(token));
 
       return asio::async_initiate<decltype(bound_token), void(std::error_code, http::response)>(
@@ -224,36 +233,39 @@ namespace aero::websocket {
         std::move(headers));
     }
 
-    template <typename CompletionToken>
-    auto async_connect(urls::url url, http::headers headers, CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<basic_connection>>
+    auto async_connect(urls::url url, http::headers headers,
+      CompletionToken&& token = aero::detail::default_token<basic_connection>()) {
       return async_connect(std::expected<urls::url, std::error_code>{std::move(url)},
         std::move(headers),
         std::forward<CompletionToken>(token));
     }
 
-    template <typename CompletionToken>
-    auto async_connect(std::string_view url, http::headers headers, CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<basic_connection>>
+    auto async_connect(std::string_view url, http::headers headers,
+      CompletionToken&& token = aero::detail::default_token<basic_connection>()) {
       return async_connect(urls::url::parse(url), std::move(headers), std::forward<CompletionToken>(token));
     }
 
-    template <typename CompletionToken>
-    auto async_connect(urls::url url, CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<basic_connection>>
+    auto async_connect(urls::url url, CompletionToken&& token = aero::detail::default_token<basic_connection>()) {
       return async_connect(std::move(url), http::headers{}, std::forward<CompletionToken>(token));
     }
 
-    template <typename CompletionToken>
-    auto async_connect(std::expected<urls::url, std::error_code> parsed_url, CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<basic_connection>>
+    auto async_connect(std::expected<urls::url, std::error_code> parsed_url,
+      CompletionToken&& token = aero::detail::default_token<basic_connection>()) {
       return async_connect(std::move(parsed_url), http::headers{}, std::forward<CompletionToken>(token));
     }
 
-    template <typename CompletionToken>
-    auto async_connect(std::string_view url, CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<basic_connection>>
+    auto async_connect(std::string_view url, CompletionToken&& token = aero::detail::default_token<basic_connection>()) {
       return async_connect(url, http::headers{}, std::forward<CompletionToken>(token));
     }
 
     // Caller must ensure that given buffer remains valid until the operation is completed
-    template <typename CompletionToken>
-    auto async_send_text(std::string_view text, CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<basic_connection>>
+    auto async_send_text(std::string_view text, CompletionToken&& token = aero::detail::default_token<basic_connection>()) {
       auto bound_token = asio::bind_allocator(aero::detail::aligned_allocator<>{}, std::forward<CompletionToken>(token));
 
       return asio::async_initiate<decltype(bound_token), void(std::error_code)>(
@@ -279,8 +291,9 @@ namespace aero::websocket {
     }
 
     // Caller must ensure that given buffer remains valid until the operation is completed
-    template <typename CompletionToken>
-    auto async_send_binary(std::span<const std::byte> data, CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<basic_connection>>
+    auto async_send_binary(std::span<const std::byte> data,
+      CompletionToken&& token = aero::detail::default_token<basic_connection>()) {
       auto bound_token = asio::bind_allocator(aero::detail::aligned_allocator<>{}, std::forward<CompletionToken>(token));
 
       return asio::async_initiate<decltype(bound_token), void(std::error_code)>(
@@ -305,19 +318,20 @@ namespace aero::websocket {
         data);
     }
 
-    template <typename CompletionToken>
-    auto async_ping(std::string_view text, CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<basic_connection>>
+    auto async_ping(std::string_view text, CompletionToken&& token = aero::detail::default_token<basic_connection>()) {
       std::span text_bytes(reinterpret_cast<const std::byte*>(text.data()), text.size());
       return async_ping(text_bytes, std::forward<CompletionToken>(token));
     }
 
-    template <typename CompletionToken>
-    auto async_ping(CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<basic_connection>>
+    auto async_ping(CompletionToken&& token = aero::detail::default_token<basic_connection>()) {
       return async_ping(null_bytes, std::forward<CompletionToken>(token));
     }
 
-    template <typename CompletionToken>
-    auto async_ping(std::span<const std::byte> data, CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<basic_connection>>
+    auto async_ping(std::span<const std::byte> data,
+      CompletionToken&& token = aero::detail::default_token<basic_connection>()) {
       auto bound_token = asio::bind_allocator(aero::detail::aligned_allocator<>{}, std::forward<CompletionToken>(token));
 
       return asio::async_initiate<decltype(bound_token), void(std::error_code)>(
@@ -342,8 +356,9 @@ namespace aero::websocket {
         data);
     }
 
-    template <typename CompletionToken>
-    auto async_pong(std::span<const std::byte> data, CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<basic_connection>>
+    auto async_pong(std::span<const std::byte> data,
+      CompletionToken&& token = aero::detail::default_token<basic_connection>()) {
       auto bound_token = asio::bind_allocator(aero::detail::aligned_allocator<>{}, std::forward<CompletionToken>(token));
 
       return asio::async_initiate<decltype(bound_token), void(std::error_code)>(
@@ -368,19 +383,20 @@ namespace aero::websocket {
         data);
     }
 
-    template <typename CompletionToken>
-    auto async_pong(std::string_view text, CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<basic_connection>>
+    auto async_pong(std::string_view text, CompletionToken&& token = aero::detail::default_token<basic_connection>()) {
       std::span text_bytes(reinterpret_cast<const std::byte*>(text.data()), text.size());
       return async_pong(text_bytes, std::forward<CompletionToken>(token));
     }
 
-    template <typename CompletionToken>
-    auto async_pong(CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<basic_connection>>
+    auto async_pong(CompletionToken&& token = aero::detail::default_token<basic_connection>()) {
       return async_pong(null_bytes, std::forward<CompletionToken>(token));
     }
 
-    template <typename CompletionToken>
-    auto async_close(websocket::close_code code, std::string_view reason, CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<basic_connection>>
+    auto async_close(websocket::close_code code, std::string_view reason,
+      CompletionToken&& token = aero::detail::default_token<basic_connection>()) {
       auto bound_token = asio::bind_allocator(aero::detail::aligned_allocator<>{}, std::forward<CompletionToken>(token));
 
       return asio::async_initiate<decltype(bound_token), void(std::error_code)>(
@@ -445,7 +461,7 @@ namespace aero::websocket {
                   co_return *result;
                 }
 
-                // Сlose result is empty, so the timer was cancelled by the caller
+                // Close result is empty, so the timer was cancelled by the caller
                 disable_cancellation(state);
                 co_return co_await self->async_finalize_session(asio::error::operation_aborted, self->as_deferred_tuple());
               }
@@ -500,19 +516,19 @@ namespace aero::websocket {
         reason);
     }
 
-    template <typename CompletionToken>
-    auto async_close(websocket::close_code code, CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<basic_connection>>
+    auto async_close(websocket::close_code code, CompletionToken&& token = aero::detail::default_token<basic_connection>()) {
       return async_close(code, "", std::forward<CompletionToken>(token));
     }
 
     // Tear down transport without performing close handshake
-    template <typename CompletionToken>
-    auto async_force_close(CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<basic_connection>>
+    auto async_force_close(CompletionToken&& token = aero::detail::default_token<basic_connection>()) {
       return async_finalize_session(std::error_code{}, std::forward<CompletionToken>(token));
     }
 
-    template <typename CompletionToken>
-    auto async_read(CompletionToken&& token) {
+    template <typename CompletionToken = aero::detail::default_token_type<basic_connection>>
+    auto async_read(CompletionToken&& token = aero::detail::default_token<basic_connection>()) {
       auto bound_token = asio::bind_allocator(aero::detail::aligned_allocator<>{}, std::forward<CompletionToken>(token));
 
       return asio::async_initiate<decltype(bound_token), void(std::error_code, websocket::message)>(
@@ -931,7 +947,7 @@ namespace aero::websocket {
     }
 
     [[nodiscard]] executor_type get_executor() const noexcept {
-      return strand_;
+      return strand_.get_inner_executor();
     }
 
     [[nodiscard]] asio::strand<executor_type> get_strand() const noexcept {
@@ -1377,7 +1393,7 @@ namespace aero::websocket {
       return {read_buffer_.data(), read_buffer_.size()};
     }
 
-    asio::strand<executor_type> strand_;
+    aero::detail::default_token_strand<executor_type> strand_;
     websocket::detail::client_frame_builder<> client_frame_builder_;
     websocket::detail::message_reader message_reader_;
     websocket::client_handshaker client_handshaker_;
