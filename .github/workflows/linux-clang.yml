@@ -78,7 +78,7 @@ jobs:
             "${vcpkg_cmake_args[@]}"
 
       - name: Build
-        run: cmake --build "build-${{ matrix.tls.backend }}" --parallel
+        run: cmake --build "build-${{ matrix.tls.backend }}" --parallel "$(nproc)"
 
       - name: Test
         working-directory: "build-${{ matrix.tls.backend }}"
