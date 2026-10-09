@@ -69,8 +69,6 @@ jobs:
             -DCMAKE_CXX_EXTENSIONS=OFF \
             -DAERO_TLS_BACKEND=${{ matrix.tls.backend }} \
             "${vcpkg_cmake_args[@]}"
-        env:
-          CXXFLAGS: -g3
 
       - name: Build
         run: cmake --build "build-${{ matrix.tls.backend }}" --parallel
